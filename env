@@ -1,0 +1,53 @@
+# ================================================
+# VARIABLES DE ENTORNO - BOT TRADING
+# ================================================
+# Copia este archivo a .env y completa con tus claves
+# NUNCA comitas el archivo .env con claves reales
+
+# ==========================================
+# GOOGLE GEMINI (IA)
+# ==========================================
+# Obtén en: https://ai.google.dev/
+# 1. Ve a https://ai.google.dev/
+# 2. Click en "Get API Key"
+# 3. Selecciona o crea proyecto en Google Cloud
+# 4. Copia tu API key
+GEMINI_API_KEY=AIzaSyBCpakF_p7Y59T_0wFnFINiBYMx3jwdqkc
+
+# ==========================================
+# ALPHA VANTAGE (Datos de Acciones)
+# ==========================================
+# Obtén en: https://www.alphavantage.co/api/
+# 1. Ve a https://www.alphavantage.co/api/
+# 2. Completa el formulario simple
+# 3. Recibirás tu API key por email
+# 4. Nota: Tiene límite de 5 requests/minuto en free
+ALPHAVANTAGE_API_KEY=IGAM62TP3Y9NAE24
+
+# ==========================================
+# NEWS API (Noticias para Análisis)
+# ==========================================
+# Obtén en: https://newsapi.org/
+# 1. Ve a https://newsapi.org/
+# 2. Regístrate con tu email
+# 3. Confirma email
+# 4. Copia tu API key del dashboard
+NEWSAPI_KEY=35ea6b54190a4230ac0566d3dd5ec7b4
+
+# ==========================================
+# TELEGRAM (Alertas Opcionales)
+# ==========================================
+# Obtén en: https://t.me/BotFather
+# 1. Abre Telegram
+# 2. Busca @BotFather
+# 3. Envía /newbot
+# 4. Sigue las instrucciones
+# 5. Copia el token recibido
+# OPCIONAL - Solo si quieres alertas por Telegram
+TELEGRAM_TOKEN=your_telegram_bot_token_here
+TELEGRAM_CHAT_ID=your_telegram_chat_id_here
+
+# ==========================================
+# DATABASE (Futuro - No usar ahora)
+# ==========================================
+# DATABASE_URL=sqlite:///./trading_bot.db
