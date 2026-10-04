@@ -1,0 +1,22 @@
+# Entornos Virtuales (¡La causa de los 10,000 archivos!)
+venv/
+env/
+.env
+
+# Archivos compilados de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Caché de datos y Logs del Bot
+data_cache/
+*.log
+trading_bot.log
+
+# VS Code / IDEs
+.vscode/
+.idea/
+
+# Jupyter / IPython
+.ipynb_checkpoints/

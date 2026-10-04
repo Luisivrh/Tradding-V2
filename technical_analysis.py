@@ -332,41 +332,45 @@ class SignalAnalyzer:
     
     def evaluate_signal(self) -> Tuple[Optional[str], float, dict]:
         """
-        Estrategia SIMPLE y CONFIABLE:
-        - Compra: Precio > SMA200 Y RSI < 50
-        - Venta: Precio < SMA200 O RSI > 70
+        Estrategia Profesional de Scoring (0-10):
+        Calcula un puntaje basado en múltiples factores técnicos.
+        Si el score >= 6.5 es BUY. Si el score <= 3.5 es SELL.
         """
         price = self.latest["Close"]
-        sma200 = self.latest["SMA_200"]
-        rsi = self.latest["RSI"]
-        macd = self.latest["MACD"]
         
         details = {
-            "buy_score": 0,
-            "sell_score": 0,
             "price": price,
-            "rsi": rsi,
-            "macd": macd,
+            "rsi": self.latest["RSI"],
+            "macd": self.latest["MACD"],
             "adx": self.latest["ADX"],
             "volume_ratio": self.latest["Volume"] / self.latest["Volume_SMA"] if self.latest["Volume_SMA"] > 0 else 0,
         }
         
-        # COMPRA SIMPLE
-        if price > sma200 and rsi < 40:
-            buy_score = 7.0  # Señal confiable
+        # Calcular el score ponderado real (0 a 10) usando la función interna
+        buy_score = self.calculate_signal_score(signal_type="BUY")
+        sell_score = self.calculate_signal_score(signal_type="SELL")
+        
+        details.update(self.score) # Añade el desglose del score (trend, momentum, etc)
+        
+        # Lógica de decisión dinámica basada en umbrales configurables
+        from config import SIGNAL_CONFIG
+        buy_threshold = SIGNAL_CONFIG.get("buy_threshold", 6.5)
+        sell_threshold = SIGNAL_CONFIG.get("sell_threshold", 6.5) # Asumimos simetría si no está especificado
+        
+        if buy_score >= buy_threshold:
             return "BUY", buy_score, details
-        
-        # VENTA SIMPLE
-        if price < sma200 or rsi > 70:
-            sell_score = 7.0
+            
+        if sell_score >= sell_threshold:
             return "SELL", sell_score, details
-        
-        return None, 0, details
+            
+        # Si no llega al umbral, devolvemos NINGUNA, pero entregamos el score actual (el más alto)
+        max_score = max(buy_score, sell_score)
+        return None, max_score, details
     
     def print_analysis(self):
-        """Imprime análisis detallado."""
+        """Imprime análisis detallado sin emojis."""
         print(f"\n{'='*60}")
-        print(f"📈 ANALISIS TECNICO: {self.symbol}")
+        print(f"ANALISIS TECNICO: {self.symbol}")
         print(f"{'='*60}")
         print(f"Precio: {self.latest['Close']:.2f}")
         print(f"SMA20:  {self.latest['SMA_20']:.2f} | SMA50:  {self.latest['SMA_50']:.2f} | SMA200: {self.latest['SMA_200']:.2f}")

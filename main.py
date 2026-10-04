@@ -21,15 +21,25 @@ import sys
 from datetime import datetime
 from typing import Dict, List
 import json
+import codecs
+
+# Forzar salida en consola a UTF-8 para evitar errores con emojis en Windows
+if sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+if sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 from config import (
     ASSETS, LOGGING_CONFIG, STRATEGY_NAME, STRATEGY_VERSION,
-    RISK_CONFIG, SIGNAL_CONFIG, print_config
+    RISK_CONFIG, SIGNAL_CONFIG, BROKERS_CONFIG, print_config
 )
 from data_fetcher import DataFetcher, DataPreprocessor
 from technical_analysis import SignalAnalyzer
 from risk_management import RiskManager
 from backtester import BacktestRunner
+from ai_analyzer import AIAnalyzer
+
+import ccxt
 
 # ==========================================
 # CONFIGURAR LOGGING
@@ -43,10 +53,10 @@ def setup_logging():
         level=LOGGING_CONFIG["log_level"],
         format=log_format,
         handlers=[
-            logging.FileHandler(LOGGING_CONFIG["log_file"]),
-            logging.StreamHandler()
+            logging.FileHandler(LOGGING_CONFIG["log_file"], encoding='utf-8'),
+            logging.StreamHandler(sys.stdout)
         ] if LOGGING_CONFIG["console_output"] else [
-            logging.FileHandler(LOGGING_CONFIG["log_file"])
+            logging.FileHandler(LOGGING_CONFIG["log_file"], encoding='utf-8')
         ]
     )
     
@@ -65,62 +75,125 @@ class TradingBot:
         self.risk_manager = RiskManager(RISK_CONFIG["starting_capital"])
         self.data_fetcher = DataFetcher()
         self.preprocessor = DataPreprocessor()
+        self.ai_analyzer = AIAnalyzer()
         self.signals_detected = []
         self.trades_executed = []
+        
+        # Configurar clientes de Brokers si está habilitado el Live Trading
+        self.live_trading = BROKERS_CONFIG["live_trading_enabled"]
+        self.alpaca_client = None
+        
+        if self.live_trading:
+            logger.info("INICIALIZANDO CONEXION A BROKERS (MODO EJECUCION)")
+            try:
+                from alpaca.trading.client import TradingClient
+                
+                # Alpaca (Stocks & Crypto)
+                if BROKERS_CONFIG["alpaca"]["api_key"]:
+                    self.alpaca_client = TradingClient(
+                        api_key=BROKERS_CONFIG["alpaca"]["api_key"],
+                        secret_key=BROKERS_CONFIG["alpaca"]["secret_key"],
+                        paper=BROKERS_CONFIG["alpaca"]["paper"]
+                    )
+                    
+                    # Validar conexión
+                    account = self.alpaca_client.get_account()
+                    logger.info(f"[OK] Alpaca Client conectado. Capital disponible: ${account.cash}")
+            except Exception as e:
+                logger.error(f"Error conectando a Brokers: {e}")
+                self.live_trading = False
     
     def scan_market(self) -> List[Dict]:
         """
         Escanea el mercado en busca de oportunidades.
-        Analiza todos los activos configurados.
+        Analiza todos los activos configurados divididos por grupos (batch).
         """
         logger.info("="*70)
-        logger.info("🔍 INICIANDO ESCANEO DE MERCADO")
+        logger.info("🔍 INICIANDO ESCANEO DE MERCADO (POR LOTES)")
         logger.info("="*70)
         
         opportunities = []
         
-        # Obtener todos los activos
-        all_symbols = []
-        for asset_type, symbols in ASSETS.items():
-            all_symbols.extend(symbols)
-        
-        logger.info(f"Analizando {len(all_symbols)} activos...\n")
-        
-        for symbol in all_symbols:
-            # Descargar datos
-            df = self.data_fetcher.fetch_market_data(symbol)
-            
-            if df.empty:
-                logger.warning(f"[{symbol}] No se obtuvieron datos")
+        for asset_group, symbols in ASSETS.items():
+            if not symbols:
                 continue
+                
+            logger.info(f"\n📁 Analizando sector: {asset_group.upper()} ({len(symbols)} activos)...")
             
-            # Validar datos
-            if not self.preprocessor.validate_data(df, symbol):
+            group_technical_data = {}
+            group_analyzers = {}
+            
+            # 1. Fase Técnica: Descargar y analizar matemáticamente todo el grupo
+            for symbol in symbols:
+                df = self.data_fetcher.fetch_market_data(symbol)
+                
+                if df.empty:
+                    logger.warning(f"[{symbol}] No se obtuvieron datos")
+                    continue
+                
+                if not self.preprocessor.validate_data(df, symbol):
+                    continue
+                
+                try:
+                    analyzer = SignalAnalyzer(df, symbol)
+                    signal_type, tech_score, details = analyzer.evaluate_signal()
+                    details["tech_score_raw"] = tech_score
+                    details["signal_type_raw"] = signal_type
+                    
+                    group_technical_data[symbol] = details
+                    group_analyzers[symbol] = analyzer
+                except Exception as e:
+                    logger.error(f"[{symbol}] Error en análisis técnico: {e}")
+            
+            if not group_technical_data:
                 continue
+
+            # 2. Fase de IA: Evaluar todo el grupo en 1 sola llamada a Gemini
+            logger.info(f"🧠 Solicitando análisis de IA en lote para {asset_group.upper()}...")
+            ai_batch_results = {}
+            if self.ai_analyzer.enabled:
+                ai_batch_results = self.ai_analyzer.analyze_batch_sentiment(asset_group, group_technical_data)
             
-            # Analizar
-            try:
-                analyzer = SignalAnalyzer(df, symbol)
-                signal_type, score, details = analyzer.evaluate_signal()
+            # 3. Fase de Ponderación: Mezclar resultados e identificar señales
+            from config import AI_CONFIG, SIGNAL_CONFIG
+            sentiment_impact = AI_CONFIG.get("sentiment_impact", 0.3)
+            
+            for symbol, details in group_technical_data.items():
+                tech_score = details["tech_score_raw"]
                 
-                # Log resumen
-                self._log_analysis(symbol, analyzer.latest, score, details)
+                ai_score = 5.0
+                ai_explanation = "IA deshabilitada."
                 
-                # Si hay señal, registrar oportunidad
-                if signal_type:
+                if symbol in ai_batch_results:
+                    ai_score, ai_explanation = ai_batch_results[symbol]
+                
+                # Ponderación
+                final_score = (tech_score * (1 - sentiment_impact)) + (ai_score * sentiment_impact)
+                
+                details["ai_score"] = ai_score
+                details["ai_explanation"] = ai_explanation
+                
+                # Log del resultado final para este activo
+                self._log_analysis(symbol, group_analyzers[symbol].latest, final_score, details)
+                
+                # Determinar si el score final supera los umbrales
+                final_signal = None
+                if final_score >= SIGNAL_CONFIG.get("buy_threshold", 6.5):
+                    final_signal = "BUY"
+                elif final_score <= (10 - SIGNAL_CONFIG.get("sell_threshold", 6.5)):
+                    final_signal = "SELL"
+                
+                if final_signal:
                     opportunity = {
                         "timestamp": datetime.now(),
                         "symbol": symbol,
-                        "signal_type": signal_type,
-                        "score": score,
+                        "signal_type": final_signal,
+                        "score": final_score,
                         "current_price": details["price"],
                         "details": details,
                     }
                     opportunities.append(opportunity)
                     self._log_signal(opportunity)
-            
-            except Exception as e:
-                logger.error(f"[{symbol}] Error en análisis: {e}")
         
         logger.info("\n" + "="*70)
         logger.info(f"⏱️  ESCANEO COMPLETADO - {len(opportunities)} oportunidad(es) detectada(s)")
@@ -131,12 +204,13 @@ class TradingBot:
     
     def _log_analysis(self, symbol: str, latest_data, score: float, details: Dict):
         """Registra análisis técnico de un símbolo."""
+        tech_score = details.get("total", 0.0)  # El score técnico antes de la ponderación
+        ai_score = details.get("ai_score", 0.0)
+        
         logger.info(
             f"[{symbol:8}] Precio: ${details['price']:.2f} | "
-            f"RSI: {details['rsi']:.1f} | "
-            f"MACD: {details['macd']:.4f} | "
-            f"ADX: {details['adx']:.1f} | "
-            f"Vol: {details['volume_ratio']:.2f}x"
+            f"Tech Score: {tech_score:.1f} | IA Score: {ai_score:.1f} | Final: {score:.2f} "
+            f"-> RSI: {details['rsi']:.1f}"
         )
     
     def _log_signal(self, opportunity: Dict):
@@ -196,7 +270,8 @@ class TradingBot:
     def execute_trades(self, validated_opportunities: List[Dict]) -> List[Dict]:
         """
         Ejecuta trades basado en oportunidades validadas.
-        En producción, esto enviaría órdenes reales al broker.
+        Usa Alpaca para Criptos y Acciones si el Live Trading está habilitado.
+        Usa simulación interna (RiskManager) para Forex o si Live Trading es False.
         """
         logger.info("📊 Ejecutando trades...\n")
         
@@ -208,6 +283,8 @@ class TradingBot:
             signal_type = opp["signal_type"]
             
             try:
+                # 1. Simulación Interna (Paper Trading Interno)
+                # Siempre registramos la posición en el RiskManager local para llevar control
                 if signal_type == "BUY":
                     position = self.risk_manager.open_position(
                         symbol,
@@ -216,19 +293,51 @@ class TradingBot:
                         entry_date=str(datetime.now())
                     )
                     
-                    if position:
-                        executed_trades.append({
-                            "timestamp": datetime.now(),
-                            "symbol": symbol,
-                            "action": "BUY",
-                            "price": price,
-                            "quantity": position.quantity,
-                            "status": "EJECUTADO"
-                        })
+                    if not position:
+                        continue # No se pudo abrir (ej. sin fondos)
+                        
+                    qty_to_buy = position.quantity
+                    
+                    # 2. Ejecución Real en el Broker (Alpaca)
+                    # Solo enviamos la orden si está activado el live_trading Y NO es Forex
+                    is_forex = symbol in ASSETS.get("forex", [])
+                    
+                    if self.live_trading and self.alpaca_client and not is_forex:
+                        from alpaca.trading.requests import MarketOrderRequest
+                        from alpaca.trading.enums import OrderSide, TimeInForce
+                        
+                        # Limpiar símbolo para Alpaca (Ej. BTC-USD -> BTC/USD)
+                        alpaca_symbol = symbol.replace("-USD", "/USD") if "-USD" in symbol else symbol
+                        
+                        logger.info(f"Enviando orden a Alpaca: BUY {qty_to_buy:.4f} {alpaca_symbol}")
+                        
+                        market_order_data = MarketOrderRequest(
+                            symbol=alpaca_symbol,
+                            qty=qty_to_buy,
+                            side=OrderSide.BUY,
+                            time_in_force=TimeInForce.GTC
+                        )
+                        
+                        # Ejecutar orden
+                        market_order = self.alpaca_client.submit_order(order_data=market_order_data)
+                        logger.info(f"Orden Alpaca ejecutada. ID: {market_order.id}")
+                    
+                    # 3. Registrar éxito
+                    executed_trades.append({
+                        "timestamp": datetime.now(),
+                        "symbol": symbol,
+                        "action": "BUY",
+                        "price": price,
+                        "quantity": qty_to_buy,
+                        "status": "REAL (Alpaca)" if (self.live_trading and not is_forex) else "SIMULADO"
+                    })
                 
                 elif signal_type == "SELL":
                     # En producción: buscar posición abierta y cerrar
                     if symbol in self.risk_manager.positions:
+                        qty_to_sell = self.risk_manager.positions[symbol].quantity
+                        
+                        # Cerrar en el simulador interno
                         self.risk_manager.close_position(
                             symbol,
                             price,
@@ -236,12 +345,30 @@ class TradingBot:
                             exit_date=str(datetime.now())
                         )
                         
+                        # Cerrar en Alpaca
+                        is_forex = symbol in ASSETS.get("forex", [])
+                        if self.live_trading and self.alpaca_client and not is_forex:
+                            from alpaca.trading.requests import MarketOrderRequest
+                            from alpaca.trading.enums import OrderSide, TimeInForce
+                            
+                            alpaca_symbol = symbol.replace("-USD", "/USD") if "-USD" in symbol else symbol
+                            logger.info(f"Enviando orden a Alpaca: SELL {qty_to_sell:.4f} {alpaca_symbol}")
+                            
+                            market_order_data = MarketOrderRequest(
+                                symbol=alpaca_symbol,
+                                qty=qty_to_sell,
+                                side=OrderSide.SELL,
+                                time_in_force=TimeInForce.GTC
+                            )
+                            self.alpaca_client.submit_order(order_data=market_order_data)
+                        
                         executed_trades.append({
                             "timestamp": datetime.now(),
                             "symbol": symbol,
                             "action": "SELL",
                             "price": price,
-                            "status": "EJECUTADO"
+                            "quantity": qty_to_sell,
+                            "status": "REAL (Alpaca)" if (self.live_trading and not is_forex) else "SIMULADO"
                         })
             
             except Exception as e:
@@ -339,6 +466,7 @@ def mode_analyze(symbol: str):
     
     fetcher = DataFetcher()
     preprocessor = DataPreprocessor()
+    ai_analyzer = AIAnalyzer()
     
     # Descargar
     df = fetcher.fetch_market_data(symbol)
@@ -356,15 +484,32 @@ def mode_analyze(symbol: str):
     analyzer = SignalAnalyzer(df, symbol)
     signal_type, score, details = analyzer.evaluate_signal()
     
+    # Análisis IA
+    ai_score = 5.0
+    ai_explanation = "IA deshabilitada."
+    if ai_analyzer.enabled:
+        print("\n🧠 Solicitando análisis de sentimiento a Gemini (puede demorar unos segundos)...")
+        ai_score, ai_explanation = ai_analyzer.analyze_sentiment(symbol, details)
+        
+        from config import AI_CONFIG
+        sentiment_impact = AI_CONFIG.get("sentiment_impact", 0.3)
+        score = (score * (1 - sentiment_impact)) + (ai_score * sentiment_impact)
+    
     # Imprimir análisis
     analyzer.print_analysis()
     
-    print(f"\n📊 RESULTADO:")
-    print(f"   Señal: {signal_type if signal_type else 'NINGUNA'}")
-    print(f"   Score: {score:.2f}/10")
+    print(f"\n📊 RESULTADO TÉCNICO:")
     print(f"   RSI: {details['rsi']:.2f}")
     print(f"   MACD: {details['macd']:.4f}")
     print(f"   ADX: {details['adx']:.2f}")
+
+    print(f"\n🧠 ANÁLISIS DE IA (GEMINI):")
+    print(f"   Score de IA: {ai_score:.2f}/10")
+    print(f"   Razón: {ai_explanation}")
+    
+    print(f"\n🎯 VEREDICTO FINAL:")
+    print(f"   Señal: {signal_type if signal_type else 'NINGUNA'}")
+    print(f"   Score Ponderado: {score:.2f}/10")
 
 
 # ==========================================

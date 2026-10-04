@@ -1,7 +1,19 @@
-pandas==2.1.4
-numpy==1.26.2
-yfinance==0.2.32
-ccxt==4.5.84
-requests==2.32.0
-matplotlib==3.8.2
-python-dotenv==1.0.0
+# Core
+pandas==3.0.6
+numpy==1.26.4
+python-dotenv==1.2.4
+
+# APIs de Mercado
+ccxt==3.0.0
+pandas-datareader==0.11.1
+yfinance==1.7.0
+alpha_vantage==3.0.0
+
+# IA
+google-generativeai==0.8.6
+
+# Manejo de datos y red
+requests==2.34.2
+urllib3==2.8.0
+pyarrow==13.0.0
+fastparquet==2026.9.0

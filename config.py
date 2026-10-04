@@ -8,20 +8,22 @@ Ajusta aqui sin tocar el codigo principal.
 
 import os
 from datetime import timedelta
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ==========================================
 # ACTIVOS A MONITOREAR
 # ==========================================
 ASSETS = {
     # CRIPTOMONEDAS (Binance)
-    "crypto": ["BTC-USD", "ETH-USD", "SOL-USD", "ADA-USD", "BNB-USD"],
+    "crypto": ["BTC-USD", "ETH-USD", "SOL-USD", "ADA-USD", "BNB-USD", "XRP-USD", "DOT-USD"],
     
-    # ACCIONES TECH (AlphaVantage)
-    "stocks": ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL"],
+    # ACCIONES TECH Y ETFs (AlphaVantage/Tiingo)
+    "stocks": ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "SPY", "QQQ"],
     
-    # OPCIONALES - Descomenta cuando tengas datos
-    # "forex": ["EUR-USD", "GBP-USD"],
-    # "commodities": ["XAU-USD", "WTI-USD"]
+    # DIVISAS (Forex vía Tiingo - tickers sin guion)
+    "forex": ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
 }
 
 # ==========================================
@@ -29,7 +31,7 @@ ASSETS = {
 # ==========================================
 DATA_CONFIG = {
     "days_history": 730,           # 2 años de histórico
-    "cache_enabled": True,          # Guardar datos localmente
+    "cache_enabled": False,         # Desactivado temporalmente para limpiar logs
     "cache_dir": "./data_cache",    # Directorio de cache
 }
 
@@ -85,13 +87,13 @@ SIGNAL_CONFIG = {
 RISK_CONFIG = {
     # Portfolio
     "starting_capital": 10000,      # Capital inicial simulado
-    "risk_per_trade": 0.02,         # Riesgo por trade = 2% del capital
+    "risk_per_trade": 0.015,        # Riesgo por trade = 1.5% del capital (más seguro)
     "max_positions": 5,             # Maximo de posiciones simultaneas
     "max_drawdown": 0.15,           # Detener si pierde 15% del capital
     
     # Stop Loss y Take Profit
-    "stop_loss_pct": 0.02,          # 3% por debajo del entry
-    "take_profit_pct": 0.10,        # 8% por encima del entry (risk/reward 1:2.66)
+    "stop_loss_pct": 0.03,          # 3% por debajo del entry
+    "take_profit_pct": 0.05,        # 5% por encima del entry (ganancias más rápidas y frecuentes)
     
     # Trailing Stop
     "trailing_stop_enabled": True,
@@ -105,17 +107,17 @@ RISK_CONFIG = {
 # INTEGRACION CON IA (GEMINI)
 # ==========================================
 AI_CONFIG = {
-    "enabled": False,
-    "model": "gemini-flash",
-    "use_for_validation": False,    # Validar señales con IA
-    "use_for_news": False,           # Analizar noticias
+    "enabled": True,
+    "model": "gemini-3.5-flash",
+    "use_for_validation": True,    # Validar señales con IA
+    "use_for_news": True,           # Analizar noticias
     "sentiment_impact": 0.3,        # Impacto del sentimiento (0.0-1.0)
 }
 # ==========================================
 # NOTICIAS Y MACRO
 # ==========================================
 NEWS_CONFIG = {
-    "enabled": False,
+    "enabled": True,
     "check_frequency_minutes": 60,  # Buscar noticias cada hora
     "language": "en",
     "news_lookback_days": 7,
@@ -147,9 +149,23 @@ LOGGING_CONFIG = {
 # APIS Y CREDENCIALES
 # ==========================================
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-ALPHAVANTAGE_API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY")
+TIINGO_API_KEY = os.environ.get("TIINGO_API_KEY")
 NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")  # Opcional
+
+# ==========================================
+# BROKERS (PAPER TRADING / REAL)
+# ==========================================
+BROKERS_CONFIG = {
+    "live_trading_enabled": True,  # CAMBIA A TRUE PARA ENVIAR ORDENES REALES/PAPER
+
+    # ALPACA (Para Acciones y Criptos - Paper Trading recomendado)
+    "alpaca": {
+        "api_key": os.environ.get("ALPACA_API_KEY", ""),
+        "secret_key": os.environ.get("ALPACA_SECRET_KEY", ""),
+        "paper": True, # True para usar https://paper-api.alpaca.markets
+    }
+}
 
 # ==========================================
 # TIMEFRAMES PARA ANALISIS

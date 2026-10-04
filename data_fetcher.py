@@ -16,20 +16,27 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 import yfinance as yf  # Alternativa para acciones
+import requests
+import urllib3
+
+# Evitar errores de certificado SSL en yfinance (Windows)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+session = requests.Session()
+session.verify = False
 
 try:
     import ccxt
 except ImportError:
     ccxt = None
 
-try:
-    from alpha_vantage.timeseries import TimeSeries
-except ImportError:
-    TimeSeries = None
-
-from config import DATA_CONFIG, ALPHAVANTAGE_API_KEY, ASSETS
+from config import DATA_CONFIG, TIINGO_API_KEY, ASSETS
 
 logger = logging.getLogger(__name__)
+
+# Configurar Tiingo API Key en la variable de entorno global que lee pandas-datareader
+if TIINGO_API_KEY:
+    os.environ["TIINGO_API_KEY"] = TIINGO_API_KEY
+import pandas_datareader as pdr
 
 # ==========================================
 # DATA FETCHER CON CACHE
@@ -48,7 +55,27 @@ class DataFetcher:
         
         # Inicializar APIs
         self.binance = ccxt.binance() if ccxt else None
-        self.ts = TimeSeries(key=ALPHAVANTAGE_API_KEY, output_format='pandas') if TimeSeries and ALPHAVANTAGE_API_KEY else None
+        
+        # Limpieza automática del caché viejo
+        if self.cache_enabled:
+            self._cleanup_old_cache()
+            
+    def _cleanup_old_cache(self, max_days_old: int = 7):
+        """Elimina archivos de caché que tengan más de X días de antigüedad para ahorrar espacio."""
+        try:
+            now = datetime.now()
+            deleted_count = 0
+            for file_path in self.cache_dir.glob("*.parquet"):
+                # Revisar la fecha de modificación del archivo
+                modified_time = datetime.fromtimestamp(file_path.stat().st_mtime)
+                if (now - modified_time).days > max_days_old:
+                    file_path.unlink()
+                    deleted_count += 1
+            
+            if deleted_count > 0:
+                logger.info(f"🧹 Limpieza automática: {deleted_count} archivos de caché viejos eliminados.")
+        except Exception as e:
+            logger.error(f"Error durante limpieza de caché: {e}")
     
     def _get_cache_path(self, symbol: str) -> Path:
         """Ruta del archivo de caché."""
@@ -121,7 +148,7 @@ class DataFetcher:
             df = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
             
             self._save_to_cache(symbol, df)
-            logger.info(f"✅ {symbol}: {len(df)} velas descargadas")
+            logger.info(f"[OK] {symbol}: {len(df)} velas descargadas")
             
             return df
         
@@ -131,8 +158,7 @@ class DataFetcher:
     
     def fetch_stock(self, symbol: str) -> pd.DataFrame:
         """
-        Descarga datos de acciones.
-        Intenta con AlphaVantage primero, luego yfinance como fallback.
+        Descarga datos de acciones usando la API oficial de Tiingo vía HTTP crudo.
         """
         # Intentar caché
         cached_df = self._load_from_cache(symbol)
@@ -140,36 +166,86 @@ class DataFetcher:
             return cached_df
         
         try:
-            logger.info(f"Descargando datos de acción: {symbol}")
+            logger.info(f"Descargando datos de accion (Tiingo HTTP): {symbol}")
             
-            # Intentar yfinance (más rápido y confiable)
-            df = yf.download(symbol, period="2y", progress=False)
-            
-            if df.empty:
-                logger.warning(f"No se encontraron datos para {symbol}")
+            if not TIINGO_API_KEY:
+                logger.error("TIINGO_API_KEY no encontrada en .env")
                 return pd.DataFrame()
             
-            # Normalizar columnas
-            df.columns = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+            # Calcular fecha de inicio hace 2 años
+            start_date = (datetime.now() - timedelta(days=self.days_history)).strftime("%Y-%m-%d")
+            
+            url = f"https://api.tiingo.com/tiingo/daily/{symbol}/prices"
+            params = {
+                "startDate": start_date,
+                "format": "json"
+            }
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Token {TIINGO_API_KEY}"
+            }
+            
+            # Petición HTTP a Tiingo
+            response = requests.get(url, headers=headers, params=params, verify=False, timeout=10)
+            
+            if response.status_code == 404:
+                logger.warning(f"Activo {symbol} no encontrado en Tiingo.")
+                return pd.DataFrame()
+            
+            if response.status_code != 200:
+                logger.error(f"Error de Tiingo para {symbol}: {response.text}")
+                return pd.DataFrame()
+                
+            data = response.json()
+            
+            if not data:
+                logger.warning(f"No se encontraron datos de tiempo para {symbol}")
+                return pd.DataFrame()
+            
+            # Convertir JSON a DataFrame
+            df = pd.DataFrame(data)
+            
+            # Tiingo devuelve la fecha en 'date', la convertimos al indice
+            df["Date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+            df = df.set_index("Date")
+            
+            # Usaremos las columnas ajustadas para evitar saltos por splits
+            # Renombramos a formato estándar OHLCV
+            df = df.rename(columns={
+                'adjOpen': 'Open',
+                'adjHigh': 'High',
+                'adjLow': 'Low',
+                'adjClose': 'Close',
+                'adjVolume': 'Volume'
+            })
+            
+            df = df.sort_index(ascending=True)
             df = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
             
+            # Validar que tengamos suficientes datos
+            if len(df) < 50:
+                logger.warning(f"Insuficientes datos para {symbol} (Solo {len(df)} velas)")
+                return pd.DataFrame()
+                
             self._save_to_cache(symbol, df)
-            logger.info(f"✅ {symbol}: {len(df)} velas descargadas")
+            logger.info(f"[OK] {symbol}: {len(df)} velas descargadas")
             
             return df
         
         except Exception as e:
-            logger.error(f"Error descargando {symbol}: {e}")
+            logger.error(f"Error descargando {symbol} con Tiingo HTTP: {e}")
             return pd.DataFrame()
     
     def fetch_market_data(self, symbol: str) -> pd.DataFrame:
         """
         Descarga datos de cualquier símbolo.
-        Auto-detecta el tipo (crypto/stock) y usa el método apropiado.
+        Auto-detecta el tipo (crypto/stock/forex) y usa el método apropiado.
         """
+        # Criptomonedas (tienen guion medio en nuestro formato de Binance, ej BTC-USD)
         if "-USD" in symbol or "/" in symbol:
             return self.fetch_crypto(symbol)
         else:
+            # Acciones y Forex pasan por Tiingo
             return self.fetch_stock(symbol)
     
     def fetch_all_assets(self) -> dict:
@@ -177,7 +253,7 @@ class DataFetcher:
         data = {}
         
         for asset_type, symbols in ASSETS.items():
-            logger.info(f"\n📦 Descargando {asset_type}...")
+            logger.info(f"\n[+] Descargando sector {asset_type}...")
             
             for symbol in symbols:
                 df = self.fetch_market_data(symbol)
