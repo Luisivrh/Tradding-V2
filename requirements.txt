@@ -1,6 +1,6 @@
 # Core
-pandas==3.0.6
-numpy==1.26.4
+pandas>=2.1.4
+numpy<2.0.0
 python-dotenv==1.2.4
 
 # APIs de Mercado
@@ -16,7 +16,7 @@ alpaca-py==0.44.0
 google-generativeai==0.8.6
 
 # Manejo de datos y red
-requests==2.34.2
-urllib3==2.8.0
-pyarrow==13.0.0
-fastparquet==2026.9.0
+requests>=2.30.0
+urllib3<2.0.0
+pyarrow<14.0.0
+fastparquet>=2023.0.0
