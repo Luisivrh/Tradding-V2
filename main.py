@@ -38,6 +38,7 @@ from technical_analysis import SignalAnalyzer
 from risk_management import RiskManager
 from backtester import BacktestRunner
 from ai_analyzer import AIAnalyzer
+from telegram_bot import TelegramNotifier
 
 import ccxt
 import requests
@@ -86,8 +87,10 @@ class TradingBot:
         self.data_fetcher = DataFetcher()
         self.preprocessor = DataPreprocessor()
         self.ai_analyzer = AIAnalyzer()
+        self.telegram = TelegramNotifier()
         self.signals_detected = []
         self.trades_executed = []
+        self.evaluations_log = []
         
         # Configurar clientes de Brokers si está habilitado el Live Trading
         self.live_trading = BROKERS_CONFIG["live_trading_enabled"]
@@ -123,6 +126,7 @@ class TradingBot:
         logger.info("="*70)
         
         opportunities = []
+        self.evaluations_log.clear() # Limpiar log de evaluaciones de Telegram
         
         for asset_group, symbols in ASSETS.items():
             if not symbols:
@@ -132,6 +136,7 @@ class TradingBot:
             
             group_technical_data = {}
             group_analyzers = {}
+            current_prices_dict = {}
             
             # 1. Fase Técnica: Descargar y analizar matemáticamente todo el grupo
             for symbol in symbols:
@@ -139,9 +144,11 @@ class TradingBot:
                 
                 if df.empty:
                     logger.warning(f"[{symbol}] No se obtuvieron datos")
+                    self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Sin Datos")
                     continue
                 
                 if not self.preprocessor.validate_data(df, symbol):
+                    self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Datos Inválidos")
                     continue
                 
                 try:
@@ -152,17 +159,36 @@ class TradingBot:
                     
                     group_technical_data[symbol] = details
                     group_analyzers[symbol] = analyzer
+                    current_prices_dict[symbol] = details["price"]
                 except Exception as e:
                     logger.error(f"[{symbol}] Error en análisis técnico: {e}")
+                    self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Técnico")
             
             if not group_technical_data:
                 continue
+                
+            # 1.5 Revisión de Gestión de Riesgo (Stop Loss / Take Profit dinámico)
+            forced_exits = self.risk_manager.check_exit_conditions(current_prices_dict)
+            if forced_exits:
+                for exit_opp in forced_exits:
+                    logger.warning(f"🚨 SALIDA DE EMERGENCIA: {exit_opp['symbol']} -> {exit_opp['details']['reason']}")
+                    opportunities.append(exit_opp)
+                    self._log_signal(exit_opp)
+                    
+                    # Lo quitamos de group_technical_data para que la IA no lo analice para una "nueva compra" hoy
+                    if exit_opp['symbol'] in group_technical_data:
+                        del group_technical_data[exit_opp['symbol']]
 
             # 2. Fase de IA: Evaluar todo el grupo en 1 sola llamada a Gemini
             logger.info(f"🧠 Solicitando análisis de IA en lote para {asset_group.upper()}...")
             ai_batch_results = {}
             if self.ai_analyzer.enabled:
                 ai_batch_results = self.ai_analyzer.analyze_batch_sentiment(asset_group, group_technical_data)
+                
+                # Checar si Gemini falló (El ai_analyzer devuelve 5.0 y un string de Error)
+                first_result = next(iter(ai_batch_results.values()), None)
+                if first_result and "Error IA" in first_result[1]:
+                    self.telegram.send_error("Gemini AI API", first_result[1])
             
             # 3. Fase de Ponderación: Mezclar resultados e identificar señales
             from config import AI_CONFIG, SIGNAL_CONFIG
@@ -182,6 +208,9 @@ class TradingBot:
                 
                 details["ai_score"] = ai_score
                 details["ai_explanation"] = ai_explanation
+                
+                # Guardar evaluación para Telegram
+                self.evaluations_log.append(f"📊 {symbol:6} | Fin:{final_score:.1f} | T:{tech_score:.1f} | IA:{ai_score:.1f}")
                 
                 # Log del resultado final para este activo
                 self._log_analysis(symbol, group_analyzers[symbol].latest, final_score, details)
@@ -353,6 +382,16 @@ class TradingBot:
                         "quantity": qty_to_buy,
                         "status": "REAL (Alpaca)" if (self.live_trading and not is_forex) else "SIMULADO"
                     })
+                    
+                    # 4. Alerta de Telegram
+                    self.telegram.send_trade_alert(
+                        symbol=symbol, 
+                        action="BUY", 
+                        price=price, 
+                        score=opp["score"], 
+                        qty=qty_to_buy, 
+                        is_real=(self.live_trading and not is_forex)
+                    )
                 
                 elif signal_type == "SELL":
                     # En producción: buscar posición abierta y cerrar
@@ -454,6 +493,28 @@ def mode_live():
     
     # Reporte
     bot.print_report()
+    
+    # Enviar resumen completo por Telegram
+    from config import AI_CONFIG, RISK_CONFIG, SIGNAL_CONFIG, BROKERS_CONFIG, ASSETS
+    total_assets = sum(len(v) for v in ASSETS.values())
+    
+    config_details = {
+        "ia_enabled": AI_CONFIG["enabled"],
+        "live_trading": BROKERS_CONFIG["live_trading_enabled"],
+        "buy_threshold": SIGNAL_CONFIG["buy_threshold"],
+        "risk_pct": RISK_CONFIG["risk_per_trade"] * 100,
+        "tp_pct": RISK_CONFIG["take_profit_pct"] * 100,
+        "sl_pct": RISK_CONFIG["stop_loss_pct"] * 100,
+        "total_assets": total_assets
+    }
+    
+    bot.telegram.send_summary(
+        detected=len(bot.signals_detected),
+        executed=len(bot.trades_executed),
+        capital=bot.risk_manager.current_capital,
+        config_details=config_details,
+        evaluations=bot.evaluations_log
+    )
 
 
 def mode_backtest():

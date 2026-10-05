@@ -3,12 +3,15 @@
 GESTION DE RIESGOS - BOT TRADING
 ==============================================
 Controla stop-loss, take-profit, posición sizing,
-y protección del capital.
+y protección del capital (con Memoria Persistente).
 """
 
 import logging
-from dataclasses import dataclass
-from typing import Optional, Tuple
+import json
+from pathlib import Path
+from dataclasses import dataclass, asdict
+from typing import Optional, Dict, List
+from datetime import datetime
 from config import RISK_CONFIG
 
 logger = logging.getLogger(__name__)
@@ -26,275 +29,295 @@ class Position:
     quantity: float
     stop_loss: float
     take_profit: float
-    trailing_stop_triggered: float = None
-    
-    def current_pnl(self, current_price: float) -> Tuple[float, float]:
-        """Calcula P&L actual (valor y porcentaje)."""
-        if self.side == "BUY":
-            pnl = (current_price - self.entry_price) * self.quantity
-            pnl_pct = (current_price - self.entry_price) / self.entry_price * 100
-        else:  # SELL
-            pnl = (self.entry_price - current_price) * self.quantity
-            pnl_pct = (self.entry_price - current_price) / self.entry_price * 100
+    trailing_stop_triggered: float = 0.0
+    highest_price: float = 0.0
+
+    def to_dict(self):
+        return asdict(self)
         
-        return pnl, pnl_pct
-    
-    def should_exit(self, current_price: float) -> Tuple[bool, str]:
-        """Determina si la posición debe cerrarse."""
-        
-        # Stop Loss
-        if self.side == "BUY" and current_price <= self.stop_loss:
-            return True, f"STOP_LOSS ({current_price:.2f} <= {self.stop_loss:.2f})"
-        
-        if self.side == "SELL" and current_price >= self.stop_loss:
-            return True, f"STOP_LOSS ({current_price:.2f} >= {self.stop_loss:.2f})"
-        
-        # Take Profit
-        if self.side == "BUY" and current_price >= self.take_profit:
-            return True, f"TAKE_PROFIT ({current_price:.2f} >= {self.take_profit:.2f})"
-        
-        if self.side == "SELL" and current_price <= self.take_profit:
-            return True, f"TAKE_PROFIT ({current_price:.2f} <= {self.take_profit:.2f})"
-        
-        # Trailing Stop
-        if RISK_CONFIG["trailing_stop_enabled"]:
-            if self.side == "BUY":
-                trailing_level = self.trailing_stop_triggered or self.entry_price
-                new_trailing = current_price * (1 - RISK_CONFIG["trailing_stop_pct"])
-                if new_trailing > trailing_level:
-                    self.trailing_stop_triggered = new_trailing
-                # ← Añade esta verificación
-                if self.trailing_stop_triggered is not None and current_price < self.trailing_stop_triggered:
-                    return True, f"TRAILING_STOP"
-        
-        return False, ""
-    
-    def __str__(self):
-        return f"{self.side} {self.quantity:.4f} {self.symbol} @ {self.entry_price:.2f}"
+    @classmethod
+    def from_dict(cls, data):
+        return cls(**data)
 
 
 # ==========================================
-# PORTFOLIO MANAGER
+# GESTOR DE RIESGOS Y MEMORIA
 # ==========================================
 class RiskManager:
-    """Gestiona el capital, posiciones y riesgos."""
-    
-    def __init__(self, initial_capital: float):
-        self.initial_capital = initial_capital
-        self.current_capital = initial_capital
-        self.positions: dict[str, Position] = {}
-        self.closed_trades: list = []
-        self.trade_history: list = []
-        self.peak_capital = initial_capital
+    """
+    Simulador interno y gestor de riesgos con memoria.
+    Guarda todas las compras en portfolio.json para evitar compras duplicadas.
+    """
+    def __init__(self, starting_capital: float = None):
+        self.portfolio_file = Path("portfolio.json")
+        self.starting_capital = starting_capital if starting_capital else RISK_CONFIG["starting_capital"]
         
-    def get_available_capital(self) -> float:
-        """Capital disponible para nuevas posiciones."""
-        capital_in_positions = sum(pos.entry_price * pos.quantity for pos in self.positions.values())
-        return self.current_capital - capital_in_positions
-    
-    def get_portfolio_value(self, current_prices: dict) -> Tuple[float, float]:
-        """Valor total del portfolio y P&L."""
-        portfolio_value = self.current_capital
-        total_pnl = 0
+        # Estado por defecto
+        self.current_capital = self.starting_capital
+        self.positions: Dict[str, List[Position]] = {} 
+        self.trade_history = []
+        self.max_pyramid = 3 # Máximo 3 compras (DCA) del mismo activo
         
-        for symbol, position in self.positions.items():
-            if symbol in current_prices:
-                pnl, _ = position.current_pnl(current_prices[symbol])
-                total_pnl += pnl
-                portfolio_value += pnl
+        self.load_portfolio()
         
-        return portfolio_value, total_pnl
-    
-    def get_drawdown(self) -> float:
-        """Drawdown máximo desde pico."""
-        return (self.current_capital - self.peak_capital) / self.peak_capital
-    
-    def calculate_position_size(self, 
-                                symbol: str, 
-                                entry_price: float, 
-                                stop_loss_price: float) -> float:
-        """
-        Calcula cuántas unidades comprar basado en:
-        - Riesgo máximo por trade (% del capital)
-        - Distancia al stop loss
-        
-        Formula: Position_Size = (Capital * Risk%) / (Entry - Stop_Loss)
-        """
-        
-        max_loss_amount = self.current_capital * RISK_CONFIG["risk_per_trade"]
-        risk_per_unit = abs(entry_price - stop_loss_price)
-        
-        if risk_per_unit == 0:
-            return 0
-        
-        position_size = max_loss_amount / risk_per_unit
-        
-        # Validaciones
-        max_capital_per_position = self.current_capital * 0.15  # 15% max por posición
-        max_units = max_capital_per_position / entry_price
-        
-        position_size = min(position_size, max_units)
-        
-        logger.info(
-            f"[{symbol}] Position Size: {position_size:.4f} units | "
-            f"Risk: ${max_loss_amount:.2f} | "
-            f"Capital: ${self.current_capital:.2f}"
+    def load_portfolio(self):
+        """Carga el estado del portafolio desde el disco (Anti-Amnesia)."""
+        if self.portfolio_file.exists():
+            try:
+                with open(self.portfolio_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.current_capital = data.get("current_capital", self.starting_capital)
+                    self.trade_history = data.get("trade_history", [])
+                    
+                    # Cargar posiciones
+                    raw_positions = data.get("positions", {})
+                    for sym, pos_list in raw_positions.items():
+                        self.positions[sym] = [Position.from_dict(p) for p in pos_list]
+                        
+                logger.info(f"💾 Portafolio cargado: Capital ${self.current_capital:.2f}, {sum(len(v) for v in self.positions.values())} posiciones abiertas.")
+            except Exception as e:
+                logger.error(f"Error cargando portfolio.json: {e}. Iniciando en limpio.")
+                self.current_capital = self.starting_capital
+                self.positions = {}
+        else:
+            logger.info(f"🆕 Iniciando nuevo portafolio de simulación con ${self.current_capital:.2f}")
+
+    def save_portfolio(self):
+        """Guarda el estado del portafolio en el disco."""
+        try:
+            data = {
+                "current_capital": self.current_capital,
+                "positions": {sym: [p.to_dict() for p in pos_list] for sym, pos_list in self.positions.items()},
+                "trade_history": self.trade_history
+            }
+            with open(self.portfolio_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            logger.error(f"Error guardando portfolio.json: {e}")
+
+    def get_total_portfolio_value(self) -> float:
+        """Estima el valor total (capital líquido + valor invertido en posiciones)."""
+        pos_value = sum(
+            p.quantity * p.entry_price 
+            for pos_list in self.positions.values() 
+            for p in pos_list
         )
+        return self.current_capital + pos_value
+
+    def get_drawdown(self) -> float:
+        """Calcula la pérdida actual vs capital inicial."""
+        current_val = self.get_total_portfolio_value()
+        if current_val >= self.starting_capital:
+            return 0.0
+        return (self.starting_capital - current_val) / self.starting_capital
+
+    def _calculate_position_size(self, entry_price: float, stop_loss_price: float) -> float:
+        """Calcula el tamaño de posición basado en riesgo."""
+        risk_amount = self.get_total_portfolio_value() * RISK_CONFIG["risk_per_trade"]
+        price_risk_per_unit = abs(entry_price - stop_loss_price)
         
-        return position_size
-    
-    def open_position(self,
-                     symbol: str,
-                     entry_price: float,
-                     side: str = "BUY",
-                     stop_loss_pct: Optional[float] = None,
-                     take_profit_pct: Optional[float] = None,
-                     entry_date: str = "") -> Optional[Position]:
-        """
-        Abre una nueva posición con gestión automática de riesgo.
+        if price_risk_per_unit <= 0:
+            return 0
+            
+        units = risk_amount / price_risk_per_unit
         
-        Args:
-            symbol: Símbolo del activo
-            entry_price: Precio de entrada
-            side: "BUY" o "SELL"
-            stop_loss_pct: Porcentaje del stop loss (ej: 0.03 = 3%)
-            take_profit_pct: Porcentaje del take profit
-            entry_date: Fecha de entrada
-        """
+        # Validar que tengamos suficiente capital líquido
+        max_units_affordable = self.current_capital / entry_price
+        return min(units, max_units_affordable)
+
+    def can_open_position(self, symbol: str, price: float) -> bool:
+        """Reglas estrictas anti-amnesia y Promedio DCA."""
+        total_open_trades = sum(len(v) for v in self.positions.values())
+        if total_open_trades >= RISK_CONFIG["max_positions"]:
+            logger.warning(f"[{symbol}] Rechazado: Máximo de posiciones globales alcanzado ({total_open_trades}).")
+            return False
+            
+        if symbol in self.positions and len(self.positions[symbol]) > 0:
+            pos_list = self.positions[symbol]
+            
+            # Regla 1: Límite de piramidación
+            if len(pos_list) >= self.max_pyramid:
+                logger.warning(f"[{symbol}] Rechazado: Máximo de compras DCA alcanzado para este activo ({self.max_pyramid}).")
+                return False
+                
+            # Regla 2: No comprar el mismo día
+            today = str(datetime.now().date())
+            # Convertimos la fecha guardada para compararla
+            last_trade_date_str = pos_list[-1].entry_date[:10] # ej "2026-10-04"
+            if today == last_trade_date_str:
+                logger.warning(f"[{symbol}] Rechazado (Regla Anti-Spam): Ya se compró este activo el día de hoy.")
+                return False
+                
+            # Regla 3: DCA (Solo comprar más si cayó al menos 5%)
+            avg_entry_price = sum(p.entry_price * p.quantity for p in pos_list) / sum(p.quantity for p in pos_list)
+            if price > (avg_entry_price * 0.95):
+                logger.warning(f"[{symbol}] Rechazado (DCA): El precio actual ({price}) no es un 5% inferior a tu precio promedio ({avg_entry_price:.2f}).")
+                return False
+
+        return True
+
+    def open_position(self, symbol: str, price: float, side: str, entry_date: str) -> Optional[Position]:
+        """Abre posición si pasa los filtros de memoria y calcula stops."""
         
-        # Validaciones
-        if len(self.positions) >= RISK_CONFIG["max_positions"]:
-            logger.warning(f"Máximo de posiciones alcanzado ({RISK_CONFIG['max_positions']})")
-            return None
-        
-        if symbol in self.positions:
-            logger.warning(f"{symbol} ya tiene una posición abierta")
-            return None
-        
-        if self.get_drawdown() < -RISK_CONFIG["max_drawdown"]:
-            logger.error("Drawdown máximo alcanzado. Stop automático.")
+        if not self.can_open_position(symbol, price):
             return None
         
         # Calcular stops
-        sl_pct = stop_loss_pct or RISK_CONFIG["stop_loss_pct"]
-        tp_pct = take_profit_pct or RISK_CONFIG["take_profit_pct"]
-        
         if side == "BUY":
-            stop_loss = entry_price * (1 - sl_pct)
-            take_profit = entry_price * (1 + tp_pct)
-        else:  # SELL
-            stop_loss = entry_price * (1 + sl_pct)
-            take_profit = entry_price * (1 - tp_pct)
+            stop_loss = price * (1 - RISK_CONFIG["stop_loss_pct"])
+            take_profit = price * (1 + RISK_CONFIG["take_profit_pct"])
+        else: # SELL
+            stop_loss = price * (1 + RISK_CONFIG["stop_loss_pct"])
+            take_profit = price * (1 - RISK_CONFIG["take_profit_pct"])
+            
+        quantity = self._calculate_position_size(price, stop_loss)
         
-        # Calcular tamaño de posición
-        quantity = self.calculate_position_size(symbol, entry_price, stop_loss)
-        
-        if quantity == 0:
-            logger.error(f"No se puede abrir posición en {symbol}")
+        if quantity <= 0:
+            logger.warning(f"[{symbol}] Capital insuficiente o riesgo demasiado alto.")
             return None
+            
+        cost = quantity * price
         
-        # Crear posición
+        if cost > self.current_capital:
+            logger.warning(f"[{symbol}] Capital líquido insuficiente (${self.current_capital:.2f} < ${cost:.2f})")
+            return None
+            
+        # Ejecutar simulación contable
+        self.current_capital -= cost
+        
         position = Position(
             symbol=symbol,
-            entry_price=entry_price,
-            entry_date=entry_date,
-            side=side,
+            entry_price=price,
             quantity=quantity,
+            side=side,
             stop_loss=stop_loss,
-            take_profit=take_profit
+            take_profit=take_profit,
+            entry_date=entry_date,
+            highest_price=price
         )
-        
-        self.positions[symbol] = position
-        
-        logger.info(
-            f"✅ POSICION ABIERTA: {position} | "
-            f"SL: {stop_loss:.2f} | TP: {take_profit:.2f}"
-        )
-        
-        return position
-    
-    def close_position(self,
-                      symbol: str,
-                      exit_price: float,
-                      reason: str = "MANUAL",
-                      exit_date: str = "") -> bool:
-        """Cierra una posición abierta."""
         
         if symbol not in self.positions:
-            logger.warning(f"No hay posición abierta en {symbol}")
-            return False
+            self.positions[symbol] = []
+            
+        self.positions[symbol].append(position)
         
-        position = self.positions[symbol]
-        pnl, pnl_pct = position.current_pnl(exit_price)
+        # GUARDAR ESTADO
+        self.save_portfolio()
         
-        # Registro de operación cerrada
-        trade_record = {
-            "symbol": symbol,
-            "entry_price": position.entry_price,
-            "exit_price": exit_price,
-            "quantity": position.quantity,
-            "pnl": pnl,
-            "pnl_pct": pnl_pct,
-            "reason": reason,
-            "entry_date": position.entry_date,
-            "exit_date": exit_date
-        }
+        logger.info(f"[{symbol}] Position Size: {quantity:.4f} units | Risk: ${(abs(price-stop_loss)*quantity):.2f} | Capital: ${self.current_capital:.2f}")
+        logger.info(f"✅ POSICION ABIERTA INTERNA: {side} {quantity:.4f} {symbol} @ {price:.2f} | SL: {stop_loss:.2f} | TP: {take_profit:.2f}")
         
-        self.trade_history.append(trade_record)
-        self.current_capital += pnl
-        self.peak_capital = max(self.peak_capital, self.current_capital)
+        return position
+
+    def check_exit_conditions(self, current_prices: Dict[str, float]) -> List[Dict]:
+        """
+        Revisa todas las posiciones abiertas contra los precios actuales del mercado
+        para disparar Stop-Loss, Take-Profit o Trailing Stops.
+        Retorna una lista de órdenes de venta forzosas.
+        """
+        forced_exits = []
         
+        for symbol, pos_list in list(self.positions.items()):
+            if symbol not in current_prices:
+                continue
+                
+            current_price = current_prices[symbol]
+            sell_reasons = []
+            
+            for i, pos in enumerate(pos_list):
+                # 1. Actualizar el "Highest Price" para el Trailing Stop
+                if current_price > pos.highest_price and pos.side == "BUY":
+                    pos.highest_price = current_price
+                    # Recalcular el trailing stop price
+                    if RISK_CONFIG.get("trailing_stop_enabled", False):
+                        new_trailing_sl = pos.highest_price * (1 - RISK_CONFIG.get("trailing_stop_pct", 0.02))
+                        # El stop loss solo puede subir, nunca bajar
+                        if new_trailing_sl > pos.stop_loss:
+                            pos.stop_loss = new_trailing_sl
+                            
+                # 2. Evaluar Stop Loss (Fijo o Trailing)
+                if pos.side == "BUY" and current_price <= pos.stop_loss:
+                    sell_reasons.append(f"STOP_LOSS (Trigger en ${pos.stop_loss:.2f})")
+                    
+                # 3. Evaluar Take Profit
+                elif pos.side == "BUY" and current_price >= pos.take_profit:
+                    sell_reasons.append(f"TAKE_PROFIT (Meta de ${pos.take_profit:.2f} alcanzada)")
+                    
+                # 4. Evaluar Vencimiento (Time-based exit)
+                else:
+                    days_held = (datetime.now() - datetime.fromisoformat(pos.entry_date)).days
+                    if days_held >= RISK_CONFIG.get("max_hold_days", 30):
+                        sell_reasons.append(f"MAX_TIME (Retenido por {days_held} días)")
+
+            # Si alguna de las posiciones de este símbolo activó una alarma, lo liquidamos
+            if sell_reasons:
+                reason = " | ".join(set(sell_reasons))
+                forced_exits.append({
+                    "symbol": symbol,
+                    "signal_type": "SELL",
+                    "score": 10.0, # Fuerza máxima para que el bot venda sin dudar
+                    "current_price": current_price,
+                    "details": {"reason": reason, "price": current_price}
+                })
+                
+        # Guardar si hubo actualizaciones de Trailing Stops
+        self.save_portfolio()
+        return forced_exits
+
+    def close_position(self, symbol: str, price: float, reason: str, exit_date: str) -> float:
+        """Cierra todas las posiciones de un activo (liquidar) y devuelve el PnL."""
+        if symbol not in self.positions or not self.positions[symbol]:
+            return 0.0
+            
+        total_pnl = 0.0
+        total_revenue = 0.0
+        
+        for pos in self.positions[symbol]:
+            if pos.side == "BUY":
+                pnl = (price - pos.entry_price) * pos.quantity
+            else:
+                pnl = (pos.entry_price - price) * pos.quantity
+                
+            total_pnl += pnl
+            total_revenue += (pos.entry_price * pos.quantity) + pnl
+            
+            self.trade_history.append({
+                "symbol": symbol,
+                "side": pos.side,
+                "entry_price": pos.entry_price,
+                "exit_price": price,
+                "pnl": pnl,
+                "reason": reason,
+                "date": exit_date
+            })
+            
+        self.current_capital += total_revenue
         del self.positions[symbol]
         
-        emoji = "✅" if pnl > 0 else "❌"
-        logger.info(
-            f"{emoji} POSICION CERRADA: {symbol} | "
-            f"P&L: ${pnl:.2f} ({pnl_pct:.2f}%) | "
-            f"Razón: {reason}"
-        )
+        # GUARDAR ESTADO
+        self.save_portfolio()
         
-        return True
-    
-    def get_summary(self) -> dict:
-        """Resumen del portfolio."""
-        total_trades = len(self.trade_history)
-        winning_trades = sum(1 for t in self.trade_history if t["pnl"] > 0)
-        losing_trades = sum(1 for t in self.trade_history if t["pnl"] < 0)
-        total_pnl = sum(t["pnl"] for t in self.trade_history)
-        
-        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
-        avg_win = (sum(t["pnl"] for t in self.trade_history if t["pnl"] > 0) / winning_trades) if winning_trades > 0 else 0
-        avg_loss = (sum(t["pnl"] for t in self.trade_history if t["pnl"] < 0) / losing_trades) if losing_trades > 0 else 0
-        
-        return {
-            "total_trades": total_trades,
-            "winning_trades": winning_trades,
-            "losing_trades": losing_trades,
-            "win_rate": win_rate,
-            "total_pnl": total_pnl,
-            "avg_win": avg_win,
-            "avg_loss": avg_loss,
-            "current_capital": self.current_capital,
-            "open_positions": len(self.positions),
-            "max_drawdown": self.get_drawdown(),
-        }
-    
+        logger.info(f"🔴 VENTA INTERNA: {symbol} @ {price:.2f} | PnL: ${total_pnl:.2f} | Razón: {reason}")
+        return total_pnl
+
     def print_summary(self):
-        """Imprime un resumen bonito del portfolio."""
-        summary = self.get_summary()
-        print("\n" + "=" * 60)
-        print("📊 RESUMEN DEL PORTFOLIO")
-        print("=" * 60)
-        print(f"Capital Inicial:   ${self.initial_capital:,.2f}")
-        print(f"Capital Actual:    ${summary['current_capital']:,.2f}")
-        print(f"P&L Total:         ${summary['total_pnl']:,.2f}")
-        print(f"Posiciones Abiertas: {summary['open_positions']}")
+        """Imprime resumen del portfolio."""
+        total_value = self.get_total_portfolio_value()
+        pnl = total_value - self.starting_capital
+        pnl_pct = (pnl / self.starting_capital) * 100 if self.starting_capital > 0 else 0
+        
+        print("\n" + "="*60)
+        print("📊 RESUMEN DEL PORTFOLIO (SIMULADOR INTERNO)")
+        print("="*60)
+        print(f"Capital Libre:     ${self.current_capital:,.2f}")
+        print(f"Valor Total Estim: ${total_value:,.2f}")
+        print(f"P&L Total:         ${pnl:,.2f} ({pnl_pct:+.2f}%)")
+        print(f"Activos Abiertos:  {len(self.positions)}")
         print("-" * 60)
-        print(f"Total de Trades:   {summary['total_trades']}")
-        print(f"Trades Ganadores:  {summary['winning_trades']}")
-        print(f"Trades Perdedores: {summary['losing_trades']}")
-        print(f"Win Rate:          {summary['win_rate']:.1f}%")
-        print(f"Promedio Ganancia: ${summary['avg_win']:,.2f}")
-        print(f"Promedio Pérdida:  ${summary['avg_loss']:,.2f}")
-        print(f"Max Drawdown:      {summary['max_drawdown']*100:.2f}%")
-        print("=" * 60 + "\n")
+        
+        for sym, pos_list in self.positions.items():
+            total_qty = sum(p.quantity for p in pos_list)
+            avg_price = sum(p.entry_price * p.quantity for p in pos_list) / total_qty
+            print(f" • {sym:8} | Qty: {total_qty:.4f} | Avg Entry: ${avg_price:,.2f} | Compras: {len(pos_list)}")
+            
+        print("="*60 + "\n")

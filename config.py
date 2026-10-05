@@ -107,10 +107,10 @@ RISK_CONFIG = {
 # INTEGRACION CON IA (GEMINI)
 # ==========================================
 AI_CONFIG = {
-    "enabled": False,
+    "enabled": True,
     "model": "gemini-3.5-flash",
-    "use_for_validation": False,    # Validar señales con IA
-    "use_for_news": False,           # Analizar noticias
+    "use_for_validation": True,    # Validar señales con IA
+    "use_for_news": True,           # Analizar noticias
     "sentiment_impact": 0.3,        # Impacto del sentimiento (0.0-1.0)
 }
 # ==========================================
@@ -151,7 +151,8 @@ LOGGING_CONFIG = {
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TIINGO_API_KEY = os.environ.get("TIINGO_API_KEY")
 NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")  # Opcional
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # ==========================================
 # BROKERS (PAPER TRADING / REAL)
