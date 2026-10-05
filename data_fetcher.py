@@ -9,6 +9,7 @@ Obtiene datos históricos de múltiples fuentes:
 """
 
 import pandas as pd
+import os
 import pandas as pd
 import numpy as np
 import logging
