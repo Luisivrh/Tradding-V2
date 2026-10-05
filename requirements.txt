@@ -5,9 +5,7 @@ python-dotenv==1.2.4
 
 # APIs de Mercado
 ccxt>=4.0.0
-pandas-datareader>=0.11.0
-yfinance>=0.2.0
-alpha_vantage>=3.0.0
+pandas-datareader>=0.10.0
 
 # Ejecución Brokers
 alpaca-py>=0.44.0
