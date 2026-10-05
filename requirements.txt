@@ -9,6 +9,9 @@ pandas-datareader==0.11.1
 yfinance==1.7.0
 alpha_vantage==3.0.0
 
+# Ejecución Brokers
+alpaca-py==0.44.0
+
 # IA
 google-generativeai==0.8.6
 

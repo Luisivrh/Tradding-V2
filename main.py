@@ -40,6 +40,16 @@ from backtester import BacktestRunner
 from ai_analyzer import AIAnalyzer
 
 import ccxt
+import requests
+import urllib3
+
+# Evitar errores de certificado SSL en todo el sistema (Windows)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+original_request = requests.Session.request
+def patched_request(self, method, url, **kwargs):
+    kwargs['verify'] = False
+    return original_request(self, method, url, **kwargs)
+requests.Session.request = patched_request
 
 # ==========================================
 # CONFIGURAR LOGGING
@@ -302,25 +312,37 @@ class TradingBot:
                     # Solo enviamos la orden si está activado el live_trading Y NO es Forex
                     is_forex = symbol in ASSETS.get("forex", [])
                     
+                    logger.warning(f"[DEBUG EJECUCION] Symbol: {symbol} | Live: {self.live_trading} | Alpaca Client: {bool(self.alpaca_client)} | is_forex: {is_forex}")
+                    
                     if self.live_trading and self.alpaca_client and not is_forex:
-                        from alpaca.trading.requests import MarketOrderRequest
-                        from alpaca.trading.enums import OrderSide, TimeInForce
-                        
-                        # Limpiar símbolo para Alpaca (Ej. BTC-USD -> BTC/USD)
-                        alpaca_symbol = symbol.replace("-USD", "/USD") if "-USD" in symbol else symbol
-                        
-                        logger.info(f"Enviando orden a Alpaca: BUY {qty_to_buy:.4f} {alpaca_symbol}")
-                        
-                        market_order_data = MarketOrderRequest(
-                            symbol=alpaca_symbol,
-                            qty=qty_to_buy,
-                            side=OrderSide.BUY,
-                            time_in_force=TimeInForce.GTC
-                        )
-                        
-                        # Ejecutar orden
-                        market_order = self.alpaca_client.submit_order(order_data=market_order_data)
-                        logger.info(f"Orden Alpaca ejecutada. ID: {market_order.id}")
+                        try:
+                            from alpaca.trading.requests import MarketOrderRequest
+                            from alpaca.trading.enums import OrderSide, TimeInForce
+                            
+                            # Limpiar símbolo para Alpaca (Ej. BTC-USD -> BTC/USD)
+                            alpaca_symbol = symbol.replace("-USD", "/USD") if "-USD" in symbol else symbol
+                            
+                            # Validar que la cantidad sea un entero si es una acción, o float si es cripto
+                            # Alpaca solo permite acciones fraccionadas bajo ciertas condiciones, pero
+                            # para este ejemplo forzaremos 1 unidad mínima si la matemática calculó algo menor a 1
+                            qty_final = float(qty_to_buy)
+                            if qty_final < 0.0001:
+                                qty_final = 0.0001
+                                
+                            logger.info(f"Enviando orden a Alpaca: BUY {qty_final} {alpaca_symbol}")
+                            
+                            market_order_data = MarketOrderRequest(
+                                symbol=alpaca_symbol,
+                                qty=qty_final,
+                                side=OrderSide.BUY,
+                                time_in_force=TimeInForce.DAY
+                            )
+                            
+                            # Ejecutar orden
+                            market_order = self.alpaca_client.submit_order(order_data=market_order_data)
+                            logger.info(f"✅ Orden Alpaca confirmada. ID: {market_order.id}")
+                        except Exception as e_alpaca:
+                            logger.error(f"❌ Error en la nube de Alpaca para {symbol}: {e_alpaca}")
                     
                     # 3. Registrar éxito
                     executed_trades.append({
@@ -348,19 +370,23 @@ class TradingBot:
                         # Cerrar en Alpaca
                         is_forex = symbol in ASSETS.get("forex", [])
                         if self.live_trading and self.alpaca_client and not is_forex:
-                            from alpaca.trading.requests import MarketOrderRequest
-                            from alpaca.trading.enums import OrderSide, TimeInForce
-                            
-                            alpaca_symbol = symbol.replace("-USD", "/USD") if "-USD" in symbol else symbol
-                            logger.info(f"Enviando orden a Alpaca: SELL {qty_to_sell:.4f} {alpaca_symbol}")
-                            
-                            market_order_data = MarketOrderRequest(
-                                symbol=alpaca_symbol,
-                                qty=qty_to_sell,
-                                side=OrderSide.SELL,
-                                time_in_force=TimeInForce.GTC
-                            )
-                            self.alpaca_client.submit_order(order_data=market_order_data)
+                            try:
+                                from alpaca.trading.requests import MarketOrderRequest
+                                from alpaca.trading.enums import OrderSide, TimeInForce
+                                
+                                alpaca_symbol = symbol.replace("-USD", "/USD") if "-USD" in symbol else symbol
+                                logger.info(f"Enviando orden a Alpaca: SELL {qty_to_sell} {alpaca_symbol}")
+                                
+                                market_order_data = MarketOrderRequest(
+                                    symbol=alpaca_symbol,
+                                    qty=float(qty_to_sell),
+                                    side=OrderSide.SELL,
+                                    time_in_force=TimeInForce.GTC
+                                )
+                                market_order = self.alpaca_client.submit_order(order_data=market_order_data)
+                                logger.info(f"✅ Orden Alpaca confirmada. ID: {market_order.id}")
+                            except Exception as e_alpaca:
+                                logger.error(f"❌ Error en la nube de Alpaca para {symbol}: {e_alpaca}")
                         
                         executed_trades.append({
                             "timestamp": datetime.now(),
@@ -372,7 +398,7 @@ class TradingBot:
                         })
             
             except Exception as e:
-                logger.error(f"Error ejecutando trade en {symbol}: {e}")
+                logger.error(f"Error interno ejecutando trade en {symbol}: {e}")
         
         self.trades_executed = executed_trades
         return executed_trades

@@ -31,7 +31,7 @@ ASSETS = {
 # ==========================================
 DATA_CONFIG = {
     "days_history": 730,           # 2 años de histórico
-    "cache_enabled": False,         # Desactivado temporalmente para limpiar logs
+    "cache_enabled": True,         # Activado temporalmente para evadir limites de API
     "cache_dir": "./data_cache",    # Directorio de cache
 }
 
@@ -107,10 +107,10 @@ RISK_CONFIG = {
 # INTEGRACION CON IA (GEMINI)
 # ==========================================
 AI_CONFIG = {
-    "enabled": True,
+    "enabled": False,
     "model": "gemini-3.5-flash",
-    "use_for_validation": True,    # Validar señales con IA
-    "use_for_news": True,           # Analizar noticias
+    "use_for_validation": False,    # Validar señales con IA
+    "use_for_news": False,           # Analizar noticias
     "sentiment_impact": 0.3,        # Impacto del sentimiento (0.0-1.0)
 }
 # ==========================================
