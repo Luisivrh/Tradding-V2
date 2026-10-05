@@ -4,16 +4,16 @@ numpy<2.0.0
 python-dotenv==1.2.4
 
 # APIs de Mercado
-ccxt==3.0.0
-pandas-datareader==0.11.1
-yfinance==1.7.0
-alpha_vantage==3.0.0
+ccxt>=4.0.0
+pandas-datareader>=0.11.0
+yfinance>=0.2.0
+alpha_vantage>=3.0.0
 
 # Ejecución Brokers
-alpaca-py==0.44.0
+alpaca-py>=0.44.0
 
 # IA
-google-generativeai==0.8.6
+google-generativeai>=0.8.0
 
 # Manejo de datos y red
 requests>=2.30.0
