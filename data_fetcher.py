@@ -9,21 +9,12 @@ Obtiene datos históricos de múltiples fuentes:
 """
 
 import pandas as pd
+import pandas as pd
 import numpy as np
 import logging
-import os
-import json
-from datetime import datetime, timedelta
 from pathlib import Path
-import yfinance as yf  # Alternativa para acciones
+from datetime import datetime, timedelta
 import requests
-import urllib3
-
-# Evitar errores de certificado SSL en yfinance (Windows)
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-session = requests.Session()
-session.verify = False
-
 try:
     import ccxt
 except ImportError:
