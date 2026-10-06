@@ -11,10 +11,13 @@ pandas-datareader>=0.10.0
 alpaca-py>=0.44.0
 
 # IA
-google-generativeai>=0.8.0
+google-genai>=0.1.0
 
 # Manejo de datos y red
 requests>=2.30.0
 urllib3<2.0.0
 pyarrow<14.0.0
 fastparquet>=2023.0.0
+
+# Gráficos (Backtesting)
+matplotlib>=3.7.0

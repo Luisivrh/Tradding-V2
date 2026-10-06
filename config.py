@@ -108,7 +108,7 @@ RISK_CONFIG = {
 # ==========================================
 AI_CONFIG = {
     "enabled": True,
-    "model": "gemini-3.5-flash",
+    "model": "gemini-3.5-flash-lite",
     "use_for_validation": True,    # Validar señales con IA
     "use_for_news": True,           # Analizar noticias
     "sentiment_impact": 0.3,        # Impacto del sentimiento (0.0-1.0)

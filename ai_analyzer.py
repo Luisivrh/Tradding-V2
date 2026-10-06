@@ -12,7 +12,7 @@ import logging
 import requests
 import urllib3
 from typing import Dict, Optional, Tuple
-import google.generativeai as genai
+from google import genai
 
 # Ocultar advertencia de seguridad SSL (necesario en Windows sin certificados)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -34,7 +34,7 @@ class AIAnalyzer:
         self._setup()
 
     def _setup(self):
-        """Configura el modelo de Gemini si está habilitado."""
+        """Configura el cliente de Gemini si está habilitado."""
         if not self.enabled:
             logger.info("IA deshabilitada en la configuración.")
             return
@@ -45,11 +45,10 @@ class AIAnalyzer:
             return
 
         try:
-            genai.configure(api_key=self.gemini_key)
-            # Utilizamos gemini-1.5-flash por defecto o el que venga en la config
-            model_to_use = self.model_name if "gemini" in self.model_name else "gemini-1.5-flash"
-            self.model = genai.GenerativeModel(model_to_use)
-            logger.info(f"Modelo Gemini '{model_to_use}' configurado correctamente.")
+            # Utilizamos gemini-2.5-flash por defecto o el que venga en la config
+            self.model_name = self.model_name if "gemini" in self.model_name else "gemini-2.5-flash"
+            self.client = genai.Client(api_key=self.gemini_key)
+            logger.info(f"Cliente Gemini configurado correctamente. Usando modelo: '{self.model_name}'")
         except Exception as e:
             logger.error(f"Error al configurar Gemini: {e}")
             self.enabled = False
@@ -88,7 +87,7 @@ class AIAnalyzer:
         Esto ahorra cuota de la API y mantiene el contexto del mercado.
         Retorna: Diccionario { "BTC-USD": (score, "explicacion"), ... }
         """
-        if not self.enabled or not self.model or not symbols_data:
+        if not self.enabled or not self.client or not symbols_data:
             return {sym: (5.0, "IA deshabilitada.") for sym in symbols_data.keys()}
 
         # 1. Obtener noticias generales del grupo (ej. "crypto", "stocks")
@@ -120,7 +119,10 @@ class AIAnalyzer:
         """
 
         try:
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+            )
             response_text = response.text.strip()
             
             # Limpiar posible formato markdown que envuelva el JSON
@@ -149,13 +151,14 @@ class AIAnalyzer:
         except Exception as e:
             logger.error(f"Error en análisis batch de Gemini para {asset_group_name}: {e}")
             return {sym: (5.0, f"Error IA: {e}") for sym in symbols_data.keys()}
+    def analyze_sentiment(self, symbol: str, technical_details: Dict) -> Tuple[float, str]:
         """
         Analiza el sentimiento combinando datos técnicos y noticias recientes.
         Retorna:
             - score (float): Puntaje de 0.0 (Bearish) a 10.0 (Bullish). Neutro es 5.0.
             - explanation (str): Breve explicación generada por la IA.
         """
-        if not self.enabled or not self.model:
+        if not self.enabled or not getattr(self, 'client', None):
             return 5.0, "IA deshabilitada."
 
         news_text = self.fetch_news(symbol)
@@ -180,7 +183,10 @@ class AIAnalyzer:
         """
 
         try:
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+            )
             response_text = response.text.strip()
             
             # Limpiar posible formato markdown que envuelva el JSON
