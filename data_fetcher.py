@@ -24,7 +24,7 @@ try:
 except ImportError:
     ccxt = None
 
-from config import DATA_CONFIG, TIINGO_API_KEY, ASSETS
+from config import DATA_CONFIG, TIINGO_API_KEY, ASSETS, BROKERS_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 if TIINGO_API_KEY:
     os.environ["TIINGO_API_KEY"] = TIINGO_API_KEY
 import pandas_datareader as pdr
+
+# Importaciones de Alpaca
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
 
 # ==========================================
 # DATA FETCHER CON CACHE
@@ -50,6 +55,16 @@ class DataFetcher:
         
         # Inicializar APIs
         self.binance = ccxt.binance() if ccxt else None
+        
+        self.alpaca_client = None
+        if BROKERS_CONFIG["alpaca"]["api_key"]:
+            try:
+                self.alpaca_client = StockHistoricalDataClient(
+                    api_key=BROKERS_CONFIG["alpaca"]["api_key"],
+                    secret_key=BROKERS_CONFIG["alpaca"]["secret_key"]
+                )
+            except Exception as e:
+                logger.error(f"Error inicializando cliente de datos de Alpaca: {e}")
         
         # Limpieza automática del caché viejo
         if self.cache_enabled:
@@ -153,42 +168,74 @@ class DataFetcher:
     
     def fetch_stock(self, symbol: str) -> pd.DataFrame:
         """
-        Descarga datos de acciones usando yfinance para evitar límites de API.
+        Descarga datos de una sola acción usando Alpaca API. 
+        Si falla o no es acción de EEUU (ej. Forex), usa yfinance como respaldo.
         """
         # Intentar caché
         cached_df = self._load_from_cache(symbol)
         if cached_df is not None:
             return cached_df
+            
+        # Intentar con Alpaca primero si está disponible y no es Forex (=X)
+        if self.alpaca_client and not symbol.endswith("=X"):
+            try:
+                logger.info(f"Descargando datos de accion (Alpaca): {symbol}")
+                end_dt = datetime.now()
+                start_dt = end_dt - timedelta(days=self.days_history)
+                
+                request_params = StockBarsRequest(
+                    symbol_or_symbols=symbol,
+                    timeframe=TimeFrame.Day,
+                    start=start_dt,
+                    end=end_dt
+                )
+                
+                bars = self.alpaca_client.get_stock_bars(request_params)
+                if bars.df.empty:
+                    logger.warning(f"Alpaca no devolvió datos para {symbol}. Intentando respaldo...")
+                else:
+                    df = bars.df.reset_index()
+                    df = df.rename(columns={
+                        'timestamp': 'Date',
+                        'open': 'Open',
+                        'high': 'High',
+                        'low': 'Low',
+                        'close': 'Close',
+                        'volume': 'Volume'
+                    })
+                    df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
+                    df = df.set_index('Date')
+                    df = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
+                    
+                    if len(df) >= 50:
+                        self._save_to_cache(symbol, df)
+                        logger.info(f"[OK] {symbol}: {len(df)} velas descargadas (Alpaca)")
+                        return df
+            except Exception as e:
+                logger.warning(f"Fallo Alpaca para {symbol}: {e}. Intentando yfinance...")
         
+        # Respaldo: yfinance (Usado siempre para Forex)
         try:
-            logger.info(f"Descargando datos de accion (yfinance): {symbol}")
+            logger.info(f"Descargando datos de accion (yfinance fallback): {symbol}")
             
             # yfinance usa sufijos diferentes o ninguno. 
-            # Aseguramos un formato limpio
             yf_symbol = symbol.replace("/", "-")
-            
-            # Formato de periodo (ej. 730d para 2 años aprox)
             period_str = f"{self.days_history}d"
             
-            # Pausa aleatoria para no ser baneado por Yahoo Finance (RateLimitError)
-            time.sleep(random.uniform(1.0, 2.5))
+            time.sleep(random.uniform(3.0, 5.0))
             
-            # Crear una sesión HTTP que ignore la verificación SSL para saltar el error de "Crumb/Cookie"
             session = requests.Session()
             session.verify = False
             
-            # suppress yfinance prints
             df = yf.download(yf_symbol, period=period_str, progress=False, session=session)
             
             if df.empty:
                 logger.warning(f"No se encontraron datos en Yahoo Finance para {symbol}")
                 return pd.DataFrame()
             
-            # yfinance devuelve DataFrames multi-index a veces. Aplanamos si es necesario.
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.droplevel(1)
                 
-            # Limpiar el índice y asegurar nombres estándar
             df.index.name = "Date"
             df = df.rename(columns={
                 'Open': 'Open',
@@ -198,26 +245,104 @@ class DataFetcher:
                 'Volume': 'Volume'
             })
             
-            # Quitamos tz si existe
             if df.index.tz is not None:
                 df.index = df.index.tz_localize(None)
                 
             df = df.sort_index(ascending=True)
             df = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
             
-            # Validar que tengamos suficientes datos
             if len(df) < 50:
                 logger.warning(f"Insuficientes datos para {symbol} (Solo {len(df)} velas)")
                 return pd.DataFrame()
                 
             self._save_to_cache(symbol, df)
-            logger.info(f"[OK] {symbol}: {len(df)} velas descargadas")
+            logger.info(f"[OK] {symbol}: {len(df)} velas descargadas (yfinance)")
             
             return df
         
         except Exception as e:
             logger.error(f"Error descargando {symbol} con yfinance: {e}")
             return pd.DataFrame()
+            
+    def fetch_stocks_batch(self, symbols: list) -> dict:
+        """
+        Descarga datos de múltiples acciones a la vez usando Alpaca para evitar rate limits.
+        Retorna un diccionario {symbol: DataFrame}.
+        """
+        results = {}
+        symbols_to_fetch = []
+        
+        # Primero revisamos caché para todos
+        for sym in symbols:
+            cached_df = self._load_from_cache(sym)
+            if cached_df is not None:
+                results[sym] = cached_df
+            elif not sym.endswith("=X"): # Separar Forex
+                symbols_to_fetch.append(sym)
+            else:
+                # Si es Forex, lo mandamos directo al fallback individual
+                results[sym] = self.fetch_stock(sym)
+
+        if not symbols_to_fetch:
+            return results
+            
+        if self.alpaca_client:
+            try:
+                logger.info(f"Descargando {len(symbols_to_fetch)} acciones en LOTE usando Alpaca...")
+                end_dt = datetime.now()
+                start_dt = end_dt - timedelta(days=self.days_history)
+                
+                # Alpaca permite hasta cierto límite por request, si son muchos es mejor partirlos,
+                # pero para ~50-60 acciones generalmente un solo request funciona bien.
+                request_params = StockBarsRequest(
+                    symbol_or_symbols=symbols_to_fetch,
+                    timeframe=TimeFrame.Day,
+                    start=start_dt,
+                    end=end_dt
+                )
+                
+                bars = self.alpaca_client.get_stock_bars(request_params)
+                if not bars.df.empty:
+                    # El DataFrame multi-index tiene (symbol, timestamp)
+                    df_multi = bars.df
+                    for sym in symbols_to_fetch:
+                        try:
+                            # Extraer datos específicos del símbolo
+                            if sym in df_multi.index.get_level_values('symbol'):
+                                df_sym = df_multi.xs(sym, level='symbol').copy()
+                                df_sym = df_sym.reset_index()
+                                df_sym = df_sym.rename(columns={
+                                    'timestamp': 'Date',
+                                    'open': 'Open',
+                                    'high': 'High',
+                                    'low': 'Low',
+                                    'close': 'Close',
+                                    'volume': 'Volume'
+                                })
+                                df_sym['Date'] = pd.to_datetime(df_sym['Date']).dt.tz_localize(None)
+                                df_sym = df_sym.set_index('Date')
+                                df_sym = df_sym[["Open", "High", "Low", "Close", "Volume"]].astype(float)
+                                
+                                if len(df_sym) >= 50:
+                                    self._save_to_cache(sym, df_sym)
+                                    results[sym] = df_sym
+                                    logger.info(f"[OK] {sym}: {len(df_sym)} velas descargadas (Alpaca Batch)")
+                                else:
+                                    logger.warning(f"[{sym}] Insuficientes datos en Alpaca Batch.")
+                        except Exception as e:
+                            logger.error(f"Error procesando {sym} en batch Alpaca: {e}")
+            except Exception as e:
+                logger.error(f"Error en Alpaca Batch Fetch: {e}. Cayendo a descarga individual...")
+                
+        # Fallback individual para los que fallaron en batch o si Alpaca falló por completo
+        for sym in symbols_to_fetch:
+            if sym not in results:
+                logger.info(f"Fallback individual para: {sym}")
+                res = self.fetch_stock(sym)
+                if not res.empty:
+                    results[sym] = res
+                    
+        return results
     
     def fetch_market_data(self, symbol: str) -> pd.DataFrame:
         """

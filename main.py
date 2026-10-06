@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import Dict, List
 import json
 import codecs
+import pandas as pd
 
 # Forzar salida en consola a UTF-8 para evitar errores con emojis en Windows
 if sys.stdout.encoding.lower() != 'utf-8':
@@ -172,30 +173,60 @@ class TradingBot:
             current_prices_dict = {}
             
             # 1. Fase Técnica: Descargar y analizar matemáticamente todo el grupo
-            for symbol in symbols:
-                df = self.data_fetcher.fetch_market_data(symbol)
-                
-                if df.empty:
-                    logger.warning(f"[{symbol}] No se obtuvieron datos")
-                    self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Sin Datos")
-                    continue
-                
-                if not self.preprocessor.validate_data(df, symbol):
-                    self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Datos Inválidos")
-                    continue
-                
-                try:
-                    analyzer = SignalAnalyzer(df, symbol)
-                    signal_type, tech_score, details = analyzer.evaluate_signal()
-                    details["tech_score_raw"] = tech_score
-                    details["signal_type_raw"] = signal_type
+            # Si el grupo es 'stocks', usamos la descarga en lote (batch) de Alpaca para evitar baneos
+            if asset_group == "stocks" and hasattr(self.data_fetcher, 'fetch_stocks_batch'):
+                logger.info(f"Descargando lote de {len(symbols)} acciones usando Alpaca Batch API...")
+                batch_data = self.data_fetcher.fetch_stocks_batch(symbols)
+                for symbol in symbols:
+                    df = batch_data.get(symbol, pd.DataFrame())
                     
-                    group_technical_data[symbol] = details
-                    group_analyzers[symbol] = analyzer
-                    current_prices_dict[symbol] = details["price"]
-                except Exception as e:
-                    logger.error(f"[{symbol}] Error en análisis técnico: {e}")
-                    self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Técnico")
+                    if df.empty:
+                        logger.warning(f"[{symbol}] No se obtuvieron datos")
+                        self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Sin Datos")
+                        continue
+                    
+                    if not self.preprocessor.validate_data(df, symbol):
+                        self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Datos Inválidos")
+                        continue
+                    
+                    try:
+                        analyzer = SignalAnalyzer(df, symbol)
+                        signal_type, tech_score, details = analyzer.evaluate_signal()
+                        details["tech_score_raw"] = tech_score
+                        details["signal_type_raw"] = signal_type
+                        
+                        group_technical_data[symbol] = details
+                        group_analyzers[symbol] = analyzer
+                        current_prices_dict[symbol] = details["price"]
+                    except Exception as e:
+                        logger.error(f"[{symbol}] Error en análisis técnico: {e}")
+                        self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Técnico")
+            else:
+                # Cripto, Forex o si no hay batch disponible, descargar uno a uno
+                for symbol in symbols:
+                    df = self.data_fetcher.fetch_market_data(symbol)
+                    
+                    if df.empty:
+                        logger.warning(f"[{symbol}] No se obtuvieron datos")
+                        self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Sin Datos")
+                        continue
+                    
+                    if not self.preprocessor.validate_data(df, symbol):
+                        self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Datos Inválidos")
+                        continue
+                    
+                    try:
+                        analyzer = SignalAnalyzer(df, symbol)
+                        signal_type, tech_score, details = analyzer.evaluate_signal()
+                        details["tech_score_raw"] = tech_score
+                        details["signal_type_raw"] = signal_type
+                        
+                        group_technical_data[symbol] = details
+                        group_analyzers[symbol] = analyzer
+                        current_prices_dict[symbol] = details["price"]
+                    except Exception as e:
+                        logger.error(f"[{symbol}] Error en análisis técnico: {e}")
+                        self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Técnico")
             
             if not group_technical_data:
                 continue
@@ -435,7 +466,8 @@ class TradingBot:
                 elif signal_type == "SELL":
                     # En producción: buscar posición abierta y cerrar
                     if symbol in self.risk_manager.positions:
-                        qty_to_sell = self.risk_manager.positions[symbol].quantity
+                        # self.risk_manager.positions[symbol] es una lista de posiciones
+                        total_qty_to_sell = sum(pos.quantity for pos in self.risk_manager.positions[symbol])
                         
                         # Cerrar en el simulador interno
                         self.risk_manager.close_position(
@@ -453,11 +485,11 @@ class TradingBot:
                                 from alpaca.trading.enums import OrderSide, TimeInForce
                                 
                                 alpaca_symbol = symbol.replace("-USD", "/USD") if "-USD" in symbol else symbol
-                                logger.info(f"Enviando orden a Alpaca: SELL {qty_to_sell} {alpaca_symbol}")
+                                logger.info(f"Enviando orden a Alpaca: SELL {total_qty_to_sell} {alpaca_symbol}")
                                 
                                 market_order_data = MarketOrderRequest(
                                     symbol=alpaca_symbol,
-                                    qty=float(qty_to_sell),
+                                    qty=float(total_qty_to_sell),
                                     side=OrderSide.SELL,
                                     time_in_force=TimeInForce.GTC
                                 )
@@ -471,7 +503,7 @@ class TradingBot:
                             "symbol": symbol,
                             "action": "SELL",
                             "price": price,
-                            "quantity": qty_to_sell,
+                            "quantity": total_qty_to_sell,
                             "status": "REAL (Alpaca)" if (self.live_trading and not is_forex) else "SIMULADO"
                         })
             
