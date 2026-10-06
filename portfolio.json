@@ -1,5 +1,5 @@
 {
-    "current_capital": 5000.000000000005,
+    "current_capital": 0.0,
     "positions": {
         "AMZN": [
             {
@@ -12,6 +12,32 @@
                 "take_profit": 264.096,
                 "trailing_stop_triggered": 0.0,
                 "highest_price": 251.52
+            }
+        ],
+        "NEOVW": [
+            {
+                "symbol": "NEOVW",
+                "entry_price": 0.8438,
+                "entry_date": "2026-10-05 22:47:32.613581",
+                "side": "BUY",
+                "quantity": 5925.574780753719,
+                "stop_loss": 0.8184859999999999,
+                "take_profit": 0.88599,
+                "trailing_stop_triggered": 0.0,
+                "highest_price": 0.8438
+            }
+        ],
+        "RVSNW": [
+            {
+                "symbol": "RVSNW",
+                "entry_price": 0.015,
+                "entry_date": "2026-10-05 22:47:33.794901",
+                "side": "BUY",
+                "quantity": 1.0913936421275139e-09,
+                "stop_loss": 0.014549999999999999,
+                "take_profit": 0.01575,
+                "trailing_stop_triggered": 0.0,
+                "highest_price": 0.015
             }
         ]
     },

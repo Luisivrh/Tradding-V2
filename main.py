@@ -18,6 +18,7 @@ USO:
 import logging
 import argparse
 import sys
+import math
 from datetime import datetime
 from typing import Dict, List
 import json
@@ -122,13 +123,45 @@ class TradingBot:
         Analiza todos los activos configurados divididos por grupos (batch).
         """
         logger.info("="*70)
-        logger.info("🔍 INICIANDO ESCANEO DE MERCADO (POR LOTES)")
+        logger.info("🔍 INICIANDO ESCANEO DE MERCADO (POR LOTES + SCREENER)")
         logger.info("="*70)
         
         opportunities = []
         self.evaluations_log.clear() # Limpiar log de evaluaciones de Telegram
         
-        for asset_group, symbols in ASSETS.items():
+        # --- 1. INTEGRACIÓN DE SCREENER Y PORTFOLIO ---
+        # Hacemos una copia de los activos configurados para poder inyectar dinámicamente
+        dynamic_assets = {k: list(v) for k, v in ASSETS.items()}
+        
+        # A. Asegurar que las posiciones abiertas SIEMPRE se analicen (Regla de Oro)
+        if hasattr(self.risk_manager, 'positions'):
+            for pos_symbol in self.risk_manager.positions.keys():
+                # Agregar a "stocks" por defecto si no está en ningún grupo (o detectar cripto)
+                is_crypto = "-USD" in pos_symbol or "/" in pos_symbol
+                group_key = "crypto" if is_crypto else "stocks"
+                if pos_symbol not in dynamic_assets.get(group_key, []):
+                    if group_key not in dynamic_assets:
+                        dynamic_assets[group_key] = []
+                    dynamic_assets[group_key].append(pos_symbol)
+                    logger.info(f"📌 Activo en Portfolio inyectado al análisis: {pos_symbol}")
+                    
+        # B. Obtener activos del Screener Híbrido (Alpaca + Yahoo)
+        try:
+            from screener import DynamicScreener
+            screener = DynamicScreener()
+            if screener.enabled:
+                new_tickers = screener.get_dynamic_tickers()
+                for ticker in new_tickers:
+                    # Lo metemos al grupo "stocks" si no existe ya
+                    if ticker not in dynamic_assets.get("stocks", []):
+                        dynamic_assets.setdefault("stocks", []).append(ticker)
+        except ImportError:
+            logger.warning("Módulo screener no encontrado o dependencias faltantes. Continuando con lista estática.")
+        except Exception as e:
+            logger.error(f"Error ejecutando Screener: {e}")
+        # ----------------------------------------------
+
+        for asset_group, symbols in dynamic_assets.items():
             if not symbols:
                 continue
                 
@@ -352,11 +385,17 @@ class TradingBot:
                             alpaca_symbol = symbol.replace("-USD", "/USD") if "-USD" in symbol else symbol
                             
                             # Validar que la cantidad sea un entero si es una acción, o float si es cripto
-                            # Alpaca solo permite acciones fraccionadas bajo ciertas condiciones, pero
-                            # para este ejemplo forzaremos 1 unidad mínima si la matemática calculó algo menor a 1
-                            qty_final = float(qty_to_buy)
-                            if qty_final < 0.0001:
-                                qty_final = 0.0001
+                            # Alpaca solo permite acciones fraccionadas de símbolos populares. 
+                            # Para evitar rechazos en penny stocks o warrants, forzamos enteros.
+                            if not is_crypto:
+                                qty_final = float(math.floor(qty_to_buy))
+                                if qty_final < 1.0:
+                                    logger.warning(f"Cantidad a comprar de {symbol} es menor a 1. Se omitirá orden en Alpaca.")
+                                    continue
+                            else:
+                                qty_final = float(qty_to_buy)
+                                if qty_final < 0.0001:
+                                    qty_final = 0.0001
                                 
                             logger.info(f"Enviando orden a Alpaca: BUY {qty_final} {alpaca_symbol}")
                             

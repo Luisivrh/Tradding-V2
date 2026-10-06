@@ -23,7 +23,16 @@ ASSETS = {
     "stocks": ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "SPY", "QQQ"],
     
     # DIVISAS (Forex vía Tiingo - tickers sin guion)
-    "forex": ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
+    "forex": ["EURUSD=X", "GBPUSD=X", "JPY=X", "AUDUSD=X", "USDMXN=X", "EURMXN=X", "GBPMXN=X", "CADMXN=X" ],
+}
+
+# ==========================================
+# SCREENER DINÁMICO
+# ==========================================
+SCREENER_CONFIG = {
+    "enabled": True,
+    "max_dynamic_stocks": 10, # Máximo de acciones nuevas a agregar por escaneo
+    "sources": ["alpaca", "yahoo"], # Orden de prioridad
 }
 
 # ==========================================
@@ -31,7 +40,7 @@ ASSETS = {
 # ==========================================
 DATA_CONFIG = {
     "days_history": 730,           # 2 años de histórico
-    "cache_enabled": True,         # Activado temporalmente para evadir limites de API
+    "cache_enabled": False,         # Activado temporalmente para evadir limites de API
     "cache_dir": "./data_cache",    # Directorio de cache
 }
 
@@ -127,7 +136,7 @@ NEWS_CONFIG = {
 # BACKTESTING
 # ==========================================
 BACKTEST_CONFIG = {
-    "enabled": True,
+    "enabled": False,
     "start_date": "2024-01-01",     # Fecha inicio backtest
     "end_date": "2026-12-31",       # Fecha fin backtest
     "initial_capital": 10000,
@@ -142,7 +151,7 @@ LOGGING_CONFIG = {
     "log_file": "trading_bot.log",
     "log_level": "INFO",
     "console_output": True,
-    "save_daily_report": True,
+    "save_daily_report": False,
 }
 
 # ==========================================

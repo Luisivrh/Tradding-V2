@@ -16,6 +16,9 @@ import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 import requests
+import yfinance as yf
+import time
+import random
 try:
     import ccxt
 except ImportError:
@@ -150,7 +153,7 @@ class DataFetcher:
     
     def fetch_stock(self, symbol: str) -> pd.DataFrame:
         """
-        Descarga datos de acciones usando la API oficial de Tiingo vía HTTP crudo.
+        Descarga datos de acciones usando yfinance para evitar límites de API.
         """
         # Intentar caché
         cached_df = self._load_from_cache(symbol)
@@ -158,59 +161,47 @@ class DataFetcher:
             return cached_df
         
         try:
-            logger.info(f"Descargando datos de accion (Tiingo HTTP): {symbol}")
+            logger.info(f"Descargando datos de accion (yfinance): {symbol}")
             
-            if not TIINGO_API_KEY:
-                logger.error("TIINGO_API_KEY no encontrada en .env")
+            # yfinance usa sufijos diferentes o ninguno. 
+            # Aseguramos un formato limpio
+            yf_symbol = symbol.replace("/", "-")
+            
+            # Formato de periodo (ej. 730d para 2 años aprox)
+            period_str = f"{self.days_history}d"
+            
+            # Pausa aleatoria para no ser baneado por Yahoo Finance (RateLimitError)
+            time.sleep(random.uniform(1.0, 2.5))
+            
+            # Crear una sesión HTTP que ignore la verificación SSL para saltar el error de "Crumb/Cookie"
+            session = requests.Session()
+            session.verify = False
+            
+            # suppress yfinance prints
+            df = yf.download(yf_symbol, period=period_str, progress=False, session=session)
+            
+            if df.empty:
+                logger.warning(f"No se encontraron datos en Yahoo Finance para {symbol}")
                 return pd.DataFrame()
             
-            # Calcular fecha de inicio hace 2 años
-            start_date = (datetime.now() - timedelta(days=self.days_history)).strftime("%Y-%m-%d")
-            
-            url = f"https://api.tiingo.com/tiingo/daily/{symbol}/prices"
-            params = {
-                "startDate": start_date,
-                "format": "json"
-            }
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Token {TIINGO_API_KEY}"
-            }
-            
-            # Petición HTTP a Tiingo
-            response = requests.get(url, headers=headers, params=params, verify=False, timeout=10)
-            
-            if response.status_code == 404:
-                logger.warning(f"Activo {symbol} no encontrado en Tiingo.")
-                return pd.DataFrame()
-            
-            if response.status_code != 200:
-                logger.error(f"Error de Tiingo para {symbol}: {response.text}")
-                return pd.DataFrame()
+            # yfinance devuelve DataFrames multi-index a veces. Aplanamos si es necesario.
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
                 
-            data = response.json()
-            
-            if not data:
-                logger.warning(f"No se encontraron datos de tiempo para {symbol}")
-                return pd.DataFrame()
-            
-            # Convertir JSON a DataFrame
-            df = pd.DataFrame(data)
-            
-            # Tiingo devuelve la fecha en 'date', la convertimos al indice
-            df["Date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
-            df = df.set_index("Date")
-            
-            # Usaremos las columnas ajustadas para evitar saltos por splits
-            # Renombramos a formato estándar OHLCV
+            # Limpiar el índice y asegurar nombres estándar
+            df.index.name = "Date"
             df = df.rename(columns={
-                'adjOpen': 'Open',
-                'adjHigh': 'High',
-                'adjLow': 'Low',
-                'adjClose': 'Close',
-                'adjVolume': 'Volume'
+                'Open': 'Open',
+                'High': 'High',
+                'Low': 'Low',
+                'Close': 'Close',
+                'Volume': 'Volume'
             })
             
+            # Quitamos tz si existe
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+                
             df = df.sort_index(ascending=True)
             df = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
             
@@ -225,7 +216,7 @@ class DataFetcher:
             return df
         
         except Exception as e:
-            logger.error(f"Error descargando {symbol} con Tiingo HTTP: {e}")
+            logger.error(f"Error descargando {symbol} con yfinance: {e}")
             return pd.DataFrame()
     
     def fetch_market_data(self, symbol: str) -> pd.DataFrame:
