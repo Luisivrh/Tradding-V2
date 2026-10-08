@@ -96,13 +96,13 @@ SIGNAL_CONFIG = {
 RISK_CONFIG = {
     # Portfolio
     "starting_capital": 10000,      # Capital inicial simulado
-    "risk_per_trade": 0.015,        # Riesgo por trade = 1.5% del capital (más seguro)
+    "risk_per_trade": 0.01,         # Riesgo por trade = 1.0% del capital ($100 max perdida)
     "max_positions": 5,             # Maximo de posiciones simultaneas
     "max_drawdown": 0.15,           # Detener si pierde 15% del capital
     
     # Stop Loss y Take Profit
-    "stop_loss_pct": 0.03,          # 3% por debajo del entry
-    "take_profit_pct": 0.05,        # 5% por encima del entry (ganancias más rápidas y frecuentes)
+    "stop_loss_pct": 0.05,          # 5% por debajo del entry (Da mas respiro a la accion)
+    "take_profit_pct": 0.075,       # 7.5% por encima del entry (Ratio Riesgo/Beneficio 1:1.5)
     
     # Trailing Stop
     "trailing_stop_enabled": True,

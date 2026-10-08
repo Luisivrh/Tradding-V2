@@ -343,6 +343,92 @@ class DataFetcher:
                     results[sym] = res
                     
         return results
+
+    def fetch_forex_batch(self, symbols: list) -> dict:
+        """
+        Descarga datos de divisas (Forex) usando Tiingo API en LOTE (1 sola petición).
+        Evita por completo los bloqueos de Yahoo Finance.
+        Retorna un diccionario {symbol: DataFrame}.
+        """
+        results = {}
+        symbols_to_fetch = []
+        
+        # Revisamos caché
+        for sym in symbols:
+            cached_df = self._load_from_cache(sym)
+            if cached_df is not None:
+                results[sym] = cached_df
+            else:
+                symbols_to_fetch.append(sym)
+                
+        if not symbols_to_fetch:
+            return results
+            
+        logger.info(f"Descargando {len(symbols_to_fetch)} divisas en LOTE usando Tiingo API...")
+        
+        token = os.environ.get("TIINGO_API_KEY")
+        if not token:
+            logger.error("TIINGO_API_KEY no encontrada en las variables de entorno.")
+            return results
+            
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=self.days_history)
+        start_str = start_dt.strftime("%Y-%m-%d")
+        
+        # Convertir formato de Yahoo a Tiingo (EURUSD=X -> eurusd) y mantener mapa
+        tiingo_to_original = {sym.replace("=X", "").lower(): sym for sym in symbols_to_fetch}
+        tickers_str = ",".join(tiingo_to_original.keys())
+        
+        try:
+            url = f"https://api.tiingo.com/tiingo/fx/prices?tickers={tickers_str}&startDate={start_str}&resampleFreq=1day&token={token}"
+            response = requests.get(url)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if not data:
+                    logger.warning("No se encontraron datos en Tiingo Batch para las divisas solicitadas.")
+                    return results
+                    
+                df_all = pd.DataFrame(data)
+                
+                # Procesar cada símbolo desde el DataFrame combinado
+                for tiingo_sym, original_sym in tiingo_to_original.items():
+                    df_sym = df_all[df_all['ticker'] == tiingo_sym].copy()
+                    
+                    if df_sym.empty:
+                        logger.warning(f"No se encontraron datos en Tiingo Batch para {original_sym}")
+                        continue
+                        
+                    df_sym['Date'] = pd.to_datetime(df_sym['date']).dt.tz_localize(None)
+                    df_sym = df_sym.set_index('Date')
+                    
+                    df_sym = df_sym.rename(columns={
+                        'open': 'Open',
+                        'high': 'High',
+                        'low': 'Low',
+                        'close': 'Close'
+                    })
+                    
+                    # Forex no suele tener volumen confiable en Tiingo, agregamos 0 si falta
+                    if 'volume' not in df_sym.columns:
+                        df_sym['Volume'] = 0.0
+                        
+                    df_sym = df_sym[["Open", "High", "Low", "Close", "Volume"]].astype(float)
+                    df_sym = df_sym.sort_index(ascending=True)
+                    
+                    if len(df_sym) >= 50:
+                        self._save_to_cache(original_sym, df_sym)
+                        results[original_sym] = df_sym
+                        logger.info(f"[OK] {original_sym}: {len(df_sym)} velas descargadas (Tiingo Batch)")
+                    else:
+                        logger.warning(f"[{original_sym}] Insuficientes datos en Tiingo Batch ({len(df_sym)} velas)")
+            else:
+                logger.error(f"Error en Tiingo Batch: HTTP {response.status_code} - {response.text}")
+                
+        except Exception as e:
+            logger.error(f"Error procesando Tiingo Batch: {e}")
+            
+        return results
     
     def fetch_market_data(self, symbol: str) -> pd.DataFrame:
         """

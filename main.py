@@ -201,8 +201,35 @@ class TradingBot:
                     except Exception as e:
                         logger.error(f"[{symbol}] Error en análisis técnico: {e}")
                         self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Técnico")
+            elif asset_group == "forex" and hasattr(self.data_fetcher, 'fetch_forex_batch'):
+                logger.info(f"Descargando lote de {len(symbols)} divisas usando Tiingo API...")
+                batch_data = self.data_fetcher.fetch_forex_batch(symbols)
+                for symbol in symbols:
+                    df = batch_data.get(symbol, pd.DataFrame())
+                    
+                    if df.empty:
+                        logger.warning(f"[{symbol}] No se obtuvieron datos")
+                        self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Sin Datos")
+                        continue
+                    
+                    if not self.preprocessor.validate_data(df, symbol):
+                        self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Datos Inválidos")
+                        continue
+                    
+                    try:
+                        analyzer = SignalAnalyzer(df, symbol)
+                        signal_type, tech_score, details = analyzer.evaluate_signal()
+                        details["tech_score_raw"] = tech_score
+                        details["signal_type_raw"] = signal_type
+                        
+                        group_technical_data[symbol] = details
+                        group_analyzers[symbol] = analyzer
+                        current_prices_dict[symbol] = details["price"]
+                    except Exception as e:
+                        logger.error(f"[{symbol}] Error en análisis técnico: {e}")
+                        self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Técnico")
             else:
-                # Cripto, Forex o si no hay batch disponible, descargar uno a uno
+                # Cripto o si no hay batch disponible, descargar uno a uno
                 for symbol in symbols:
                     df = self.data_fetcher.fetch_market_data(symbol)
                     
@@ -404,8 +431,9 @@ class TradingBot:
                     # 2. Ejecución Real en el Broker (Alpaca)
                     # Solo enviamos la orden si está activado el live_trading Y NO es Forex
                     is_forex = symbol in ASSETS.get("forex", [])
+                    is_crypto = "-USD" in symbol or "/" in symbol or symbol in ASSETS.get("crypto", [])
                     
-                    logger.warning(f"[DEBUG EJECUCION] Symbol: {symbol} | Live: {self.live_trading} | Alpaca Client: {bool(self.alpaca_client)} | is_forex: {is_forex}")
+                    logger.warning(f"[DEBUG EJECUCION] Symbol: {symbol} | Live: {self.live_trading} | Alpaca Client: {bool(self.alpaca_client)} | is_forex: {is_forex} | is_crypto: {is_crypto}")
                     
                     if self.live_trading and self.alpaca_client and not is_forex:
                         try:
@@ -491,7 +519,7 @@ class TradingBot:
                                     symbol=alpaca_symbol,
                                     qty=float(total_qty_to_sell),
                                     side=OrderSide.SELL,
-                                    time_in_force=TimeInForce.GTC
+                                    time_in_force=TimeInForce.DAY
                                 )
                                 market_order = self.alpaca_client.submit_order(order_data=market_order_data)
                                 logger.info(f"✅ Orden Alpaca confirmada. ID: {market_order.id}")
