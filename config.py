@@ -95,7 +95,7 @@ SIGNAL_CONFIG = {
 # ==========================================
 RISK_CONFIG = {
     # Portfolio
-    "starting_capital": 10000,      # Capital inicial simulado
+    "starting_capital": 20000,      # Capital inicial simulado
     "risk_per_trade": 0.01,         # Riesgo por trade = 1.0% del capital ($100 max perdida)
     "max_positions": 5,             # Maximo de posiciones simultaneas
     "max_drawdown": 0.15,           # Detener si pierde 15% del capital
@@ -139,7 +139,7 @@ BACKTEST_CONFIG = {
     "enabled": False,
     "start_date": "2024-01-01",     # Fecha inicio backtest
     "end_date": "2026-12-31",       # Fecha fin backtest
-    "initial_capital": 10000,
+    "initial_capital": 20000,
     "commission": 0.001,            # 0.1% comisión por trade
     "slippage_pct": 0.002,          # 0.2% slippage
 }
