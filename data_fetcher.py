@@ -10,7 +10,6 @@ Obtiene datos históricos de múltiples fuentes:
 
 import pandas as pd
 import os
-import pandas as pd
 import numpy as np
 import logging
 from pathlib import Path
@@ -19,6 +18,20 @@ import requests
 import yfinance as yf
 import time
 import random
+import ssl
+
+# --- PARCHE PARA ERROR DE CERTIFICADOS SSL ---
+try:
+    import certifi
+    os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+    os.environ['SSL_CERT_FILE'] = certifi.where()
+except ImportError:
+    pass
+
+# Opción 2: Deshabilitar la verificación globalmente (necesario si alpaca-py ignora env vars)
+ssl._create_default_https_context = ssl._create_unverified_context
+# ---------------------------------------------
+
 try:
     import ccxt
 except ImportError:
@@ -443,20 +456,31 @@ class DataFetcher:
             return self.fetch_stock(symbol)
     
     def fetch_all_assets(self) -> dict:
-        """Descarga datos de todos los activos configurados."""
+        """Descarga datos de todos los activos configurados usando métodos batch."""
         data = {}
         
-        for asset_type, symbols in ASSETS.items():
-            logger.info(f"\n[+] Descargando sector {asset_type}...")
-            
-            for symbol in symbols:
-                df = self.fetch_market_data(symbol)
-                
+        # 1. Criptomonedas (Se mantienen individuales por Binance API)
+        if "crypto" in ASSETS:
+            logger.info("\n[+] Descargando sector crypto...")
+            for symbol in ASSETS["crypto"]:
+                df = self.fetch_crypto(symbol)
                 if not df.empty:
                     data[symbol] = df
                 else:
                     logger.warning(f"No se obtuvieron datos para {symbol}")
-        
+
+        # 2. Acciones (Batch via Alpaca)
+        if "stocks" in ASSETS:
+            logger.info("\n[+] Descargando sector stocks (Batch)...")
+            stock_data = self.fetch_stocks_batch(ASSETS["stocks"])
+            data.update(stock_data)
+            
+        # 3. Forex (Batch via Tiingo)
+        if "forex" in ASSETS:
+            logger.info("\n[+] Descargando sector forex (Batch)...")
+            forex_data = self.fetch_forex_batch(ASSETS["forex"])
+            data.update(forex_data)
+            
         return data
 
 

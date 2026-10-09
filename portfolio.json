@@ -21,10 +21,10 @@
                 "entry_date": "2026-10-07 17:57:42.593086",
                 "side": "BUY",
                 "quantity": 666666.6666666669,
-                "stop_loss": 0.00285,
+                "stop_loss": 0.003724,
                 "take_profit": 0.003225,
                 "trailing_stop_triggered": 0.0,
-                "highest_price": 0.003
+                "highest_price": 0.0038
             }
         ],
         "SDSTW": [

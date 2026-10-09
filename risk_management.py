@@ -66,6 +66,7 @@ class RiskManager:
             try:
                 with open(self.portfolio_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
+                    self.starting_capital = data.get("starting_capital", self.starting_capital)
                     self.current_capital = data.get("current_capital", self.starting_capital)
                     self.trade_history = data.get("trade_history", [])
                     
@@ -86,6 +87,7 @@ class RiskManager:
         """Guarda el estado del portafolio en el disco."""
         try:
             data = {
+                "starting_capital": self.starting_capital,
                 "current_capital": self.current_capital,
                 "positions": {sym: [p.to_dict() for p in pos_list] for sym, pos_list in self.positions.items()},
                 "trade_history": self.trade_history
@@ -318,6 +320,6 @@ class RiskManager:
         for sym, pos_list in self.positions.items():
             total_qty = sum(p.quantity for p in pos_list)
             avg_price = sum(p.entry_price * p.quantity for p in pos_list) / total_qty
-            print(f" • {sym:8} | Qty: {total_qty:.4f} | Avg Entry: ${avg_price:,.2f} | Compras: {len(pos_list)}")
+            print(f" • {sym:8} | Qty: {total_qty:.4f} | Avg Entry: ${avg_price:,.4f} | Compras: {len(pos_list)}")
             
         print("="*60 + "\n")
