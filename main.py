@@ -571,37 +571,37 @@ class TradingBot:
         portfolio_str = self.risk_manager.print_summary()
         self.portfolio_summary_str = portfolio_str # Guardar para que telegram lo pueda acceder
 
-        # ==========================================
-        # MODOS DE EJECUCION
-        # ==========================================
+# ==========================================
+# MODOS DE EJECUCION
+# ==========================================
 
-        def mode_live():
-        """Modo en vivo - escanea y ejecuta."""
-        print("\n" + "="*70)
-        print("🚀 MODO EN VIVO - BOT TRADING")
-        print("="*70)
-        print_config()
+def mode_live():
+    """Modo en vivo - escanea y ejecuta."""
+    print("\n" + "="*70)
+    print("🚀 MODO EN VIVO - BOT TRADING")
+    print("="*70)
+    print_config()
 
-        bot = TradingBot()
+    bot = TradingBot()
 
-        # Escanear mercado
-        opportunities = bot.scan_market()
+    # Escanear mercado
+    opportunities = bot.scan_market()
 
-        # Validar
-        validated = bot.validate_signals_with_context(opportunities)
+    # Validar
+    validated = bot.validate_signals_with_context(opportunities)
 
-        # Ejecutar
-        if validated:
+    # Ejecutar
+    if validated:
         executed = bot.execute_trades(validated)
 
-        # Reporte
-        bot.print_report()
+    # Reporte
+    bot.print_report()
 
-        # Enviar resumen completo por Telegram
-        from config import AI_CONFIG, RISK_CONFIG, SIGNAL_CONFIG, BROKERS_CONFIG, ASSETS
-        total_assets = sum(len(v) for v in ASSETS.values())
+    # Enviar resumen completo por Telegram
+    from config import AI_CONFIG, RISK_CONFIG, SIGNAL_CONFIG, BROKERS_CONFIG, ASSETS
+    total_assets = sum(len(v) for v in ASSETS.values())
 
-        config_details = {
+    config_details = {
         "ia_enabled": AI_CONFIG["enabled"],
         "live_trading": BROKERS_CONFIG["live_trading_enabled"],
         "buy_threshold": SIGNAL_CONFIG["buy_threshold"],
@@ -609,16 +609,16 @@ class TradingBot:
         "tp_pct": RISK_CONFIG["take_profit_pct"] * 100,
         "sl_pct": RISK_CONFIG["stop_loss_pct"] * 100,
         "total_assets": total_assets
-        }
+    }
 
-        bot.telegram.send_summary(
+    bot.telegram.send_summary(
         detected=len(bot.signals_detected),
         executed=len(bot.trades_executed),
         capital=bot.risk_manager.current_capital,
         config_details=config_details,
         evaluations=bot.evaluations_log,
         portfolio_summary=getattr(bot, 'portfolio_summary_str', "")
-        )
+    )
 
 
 def mode_backtest():
