@@ -508,3 +508,36 @@ class RiskManager:
             print(f" • {sym:8} {tag:13} | Qty: {total_qty:10.4f} | Avg Entry: ${avg_price:,.4f} | P&L: {indiv_pnl_pct:+.2f}%")
             
         print("="*70 + "\n")
+
+        # Preparar string para retornar (sin códigos de escape ANSI)
+        summary_str = "="*70 + "\n"
+        summary_str += "📊 RESUMEN DE PORTAFOLIOS INDEPENDIENTES\n"
+        summary_str += "="*70 + "\n"
+        summary_str += "📈 [1] CUENTA REAL (ALPACA - ACCIONES/CRIPTOS)\n"
+        summary_str += f"   Saldo Inicial:        ${self.starting_capital:,.2f}\n"
+        summary_str += f"   Efectivo Libre:       ${self.current_capital:,.2f}\n"
+        summary_str += f"   Valor Invertido:      ${real_current_value:,.2f} (Costo: ${real_invested_cost:,.2f})\n"
+        summary_str += f"   Valor Total Actual:   ${real_portfolio_total:,.2f}\n"
+        summary_str += f"   P&L Flotante Total:   ${pnl_real:,.2f} ({pnl_real_pct:+.2f}%)\n"
+        summary_str += f"   Posiciones Abiertas:  {real_positions_count} / {RISK_CONFIG.get('max_positions_per_type', {}).get('stocks', 5) + RISK_CONFIG.get('max_positions_per_type', {}).get('crypto', 5)}\n"
+        summary_str += "-" * 70 + "\n"
+        summary_str += "🕹️ [2] CUENTA SIMULADA (FOREX)\n"
+        summary_str += f"   Saldo Inicial:        ${self.forex_starting_capital:,.2f}\n"
+        summary_str += f"   Efectivo Libre:       ${self.forex_capital:,.2f}\n"
+        summary_str += f"   Valor Invertido:      ${simulated_current_value:,.2f} (Costo: ${simulated_invested_cost:,.2f})\n"
+        summary_str += f"   Valor Total Actual:   ${forex_portfolio_total:,.2f}\n"
+        summary_str += f"   P&L Flotante Total:   ${pnl_forex:,.2f} ({pnl_forex_pct:+.2f}%)\n"
+        summary_str += f"   Posiciones Abiertas:  {simulated_positions_count} / {RISK_CONFIG.get('max_positions_per_type', {}).get('forex', 5)}\n"
+        summary_str += "=" * 70 + "\n"
+
+        for sym, pos_list in self.positions.items():
+            total_qty = sum(p.quantity for p in pos_list)
+            avg_price = sum(p.entry_price * p.quantity for p in pos_list) / total_qty
+            last_price = pos_list[0].last_known_price if pos_list[0].last_known_price > 0 else avg_price
+            indiv_pnl_pct = ((last_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0
+            tag = "[SIM_FOREX]" if sym in forex_symbols else "[REAL_ALPACA]"
+            summary_str += f" • {sym:8} {tag:13} | Qty: {total_qty:10.4f} | Avg Entry: ${avg_price:,.4f} | P&L: {indiv_pnl_pct:+.2f}%\n"
+
+        summary_str += "="*70 + "\n"
+        
+        return summary_str

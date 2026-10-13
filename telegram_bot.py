@@ -62,14 +62,14 @@ class TelegramNotifier:
         )
         self.send_message(msg)
 
-    def send_summary(self, detected: int, executed: int, capital: float, config_details: dict, evaluations: list):
+    def send_summary(self, detected: int, executed: int, capital: float, config_details: dict, evaluations: list, portfolio_summary: str = ""):
         """Envía el resumen al finalizar el escaneo por lotes con detalles del sistema y tabla de resultados."""
-        
+
         ia_status = "✅ Activada" if config_details.get("ia_enabled") else "❌ Desactivada"
         live_status = "🟢 REAL/PAPER" if config_details.get("live_trading") else "🟡 SIMULACIÓN INTERNA"
-        
+
         evals_text = "\n".join(evaluations) if evaluations else "Sin datos procesados."
-        
+
         msg = (
             f"📊 <b>REPORTE DE ESCANEO COMPLETADO</b>\n"
             f"━━━━━━━━━━━━━━━━━━━\n\n"
@@ -83,6 +83,8 @@ class TelegramNotifier:
             f"• Umbral Compra/Venta: {config_details.get('buy_threshold')}/10\n"
             f"• Activos Escaneados: {config_details.get('total_assets')}\n\n"
             f"<b>Resultados del Escaneo:</b>\n"
-            f"<pre>{evals_text}</pre>"
+            f"<pre>{evals_text}</pre>\n\n"
+            f"<b>Estado del Portafolio:</b>\n"
+            f"<pre>{portfolio_summary}</pre>"
         )
         self.send_message(msg)
