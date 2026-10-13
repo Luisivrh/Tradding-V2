@@ -1,6 +1,6 @@
 {
     "starting_capital": 20000,
-    "current_capital": 45325.301750000006,
+    "current_capital": -2928.29,
     "forex_starting_capital": 10000,
     "forex_capital": 10000,
     "positions": {
@@ -39,6 +39,120 @@
                 "highest_price": 379.8,
                 "lowest_price": 375.19,
                 "last_known_price": 375.19,
+                "entry_score": 0.0
+            }
+        ],
+        "CDT": [
+            {
+                "symbol": "CDT",
+                "asset_type": "warrant",
+                "entry_price": 0.4599,
+                "entry_date": "2026-10-13 17:52:30.345571",
+                "side": "BUY",
+                "quantity": 14494.0,
+                "stop_loss": 0.37941749999999996,
+                "take_profit": 0.5518799999999999,
+                "atr_at_entry": 0.022995,
+                "spread_at_entry": 0.0,
+                "trailing_stop_triggered": 0.0,
+                "highest_price": 0.4715,
+                "lowest_price": 0.0,
+                "last_known_price": 0.4715,
+                "entry_score": 0.0
+            }
+        ],
+        "CIFG": [
+            {
+                "symbol": "CIFG",
+                "asset_type": "penny",
+                "entry_price": 1.69,
+                "entry_date": "2026-10-13 17:52:30.345571",
+                "side": "BUY",
+                "quantity": 4171.0,
+                "stop_loss": 1.47875,
+                "take_profit": 2.028,
+                "atr_at_entry": 0.0845,
+                "spread_at_entry": 0.0,
+                "trailing_stop_triggered": 0.0,
+                "highest_price": 1.7497,
+                "lowest_price": 0.0,
+                "last_known_price": 1.7497,
+                "entry_score": 0.0
+            }
+        ],
+        "OFAL": [
+            {
+                "symbol": "OFAL",
+                "asset_type": "warrant",
+                "entry_price": 0.387,
+                "entry_date": "2026-10-13 17:52:30.345571",
+                "side": "BUY",
+                "quantity": 39423.0,
+                "stop_loss": 0.319275,
+                "take_profit": 0.4644,
+                "atr_at_entry": 0.019350000000000003,
+                "spread_at_entry": 0.0,
+                "trailing_stop_triggered": 0.0,
+                "highest_price": 0.387,
+                "lowest_price": 0.0,
+                "last_known_price": 0.3701,
+                "entry_score": 0.0
+            }
+        ],
+        "SCLXW": [
+            {
+                "symbol": "SCLXW",
+                "asset_type": "warrant",
+                "entry_price": 0.05,
+                "entry_date": "2026-10-13 17:52:30.345571",
+                "side": "BUY",
+                "quantity": 58352.0,
+                "stop_loss": 0.04125,
+                "take_profit": 0.06,
+                "atr_at_entry": 0.0025000000000000005,
+                "spread_at_entry": 0.0,
+                "trailing_stop_triggered": 0.0,
+                "highest_price": 0.085,
+                "lowest_price": 0.0,
+                "last_known_price": 0.085,
+                "entry_score": 0.0
+            }
+        ],
+        "SHFS": [
+            {
+                "symbol": "SHFS",
+                "asset_type": "warrant",
+                "entry_price": 0.2567,
+                "entry_date": "2026-10-13 17:52:30.345571",
+                "side": "BUY",
+                "quantity": 27375.0,
+                "stop_loss": 0.21177749999999998,
+                "take_profit": 0.30804,
+                "atr_at_entry": 0.012835,
+                "spread_at_entry": 0.0,
+                "trailing_stop_triggered": 0.0,
+                "highest_price": 0.2567,
+                "lowest_price": 0.0,
+                "last_known_price": 0.2521,
+                "entry_score": 0.0
+            }
+        ],
+        "SMTK": [
+            {
+                "symbol": "SMTK",
+                "asset_type": "warrant",
+                "entry_price": 0.6299,
+                "entry_date": "2026-10-13 17:52:30.345571",
+                "side": "BUY",
+                "quantity": 6519.0,
+                "stop_loss": 0.5196675,
+                "take_profit": 0.75588,
+                "atr_at_entry": 0.031495,
+                "spread_at_entry": 0.0,
+                "trailing_stop_triggered": 0.0,
+                "highest_price": 0.6503,
+                "lowest_price": 0.0,
+                "last_known_price": 0.6503,
                 "entry_score": 0.0
             }
         ]
