@@ -12,7 +12,7 @@ from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, List
 from datetime import datetime
-from config import RISK_CONFIG
+from config import RISK_CONFIG, ASSETS
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,7 @@ class Position:
     take_profit: float
     trailing_stop_triggered: float = 0.0
     highest_price: float = 0.0
+    last_known_price: float = 0.0 # Guardar último precio detectado
 
     def to_dict(self):
         return asdict(self)
@@ -51,9 +52,11 @@ class RiskManager:
     def __init__(self, starting_capital: float = None):
         self.portfolio_file = Path("portfolio.json")
         self.starting_capital = starting_capital if starting_capital else RISK_CONFIG["starting_capital"]
+        self.forex_starting_capital = RISK_CONFIG.get("forex_starting_capital", 10000.0)
         
         # Estado por defecto
         self.current_capital = self.starting_capital
+        self.forex_capital = self.forex_starting_capital
         self.positions: Dict[str, List[Position]] = {} 
         self.trade_history = []
         self.max_pyramid = 3 # Máximo 3 compras (DCA) del mismo activo
@@ -68,6 +71,10 @@ class RiskManager:
                     data = json.load(f)
                     self.starting_capital = data.get("starting_capital", self.starting_capital)
                     self.current_capital = data.get("current_capital", self.starting_capital)
+                    
+                    self.forex_starting_capital = data.get("forex_starting_capital", self.forex_starting_capital)
+                    self.forex_capital = data.get("forex_capital", self.forex_starting_capital)
+                    
                     self.trade_history = data.get("trade_history", [])
                     
                     # Cargar posiciones
@@ -75,13 +82,14 @@ class RiskManager:
                     for sym, pos_list in raw_positions.items():
                         self.positions[sym] = [Position.from_dict(p) for p in pos_list]
                         
-                logger.info(f"💾 Portafolio cargado: Capital ${self.current_capital:.2f}, {sum(len(v) for v in self.positions.values())} posiciones abiertas.")
+                logger.info(f"💾 Portafolio cargado: Capital Alpaca ${self.current_capital:.2f} | Capital Forex ${self.forex_capital:.2f}")
             except Exception as e:
                 logger.error(f"Error cargando portfolio.json: {e}. Iniciando en limpio.")
                 self.current_capital = self.starting_capital
+                self.forex_capital = self.forex_starting_capital
                 self.positions = {}
         else:
-            logger.info(f"🆕 Iniciando nuevo portafolio de simulación con ${self.current_capital:.2f}")
+            logger.info(f"🆕 Iniciando nuevo portafolio de simulación con ${self.current_capital:.2f} (Real) y ${self.forex_capital:.2f} (Forex)")
 
     def save_portfolio(self):
         """Guarda el estado del portafolio en el disco."""
@@ -89,6 +97,8 @@ class RiskManager:
             data = {
                 "starting_capital": self.starting_capital,
                 "current_capital": self.current_capital,
+                "forex_starting_capital": self.forex_starting_capital,
+                "forex_capital": self.forex_capital,
                 "positions": {sym: [p.to_dict() for p in pos_list] for sym, pos_list in self.positions.items()},
                 "trade_history": self.trade_history
             }
@@ -97,25 +107,106 @@ class RiskManager:
         except Exception as e:
             logger.error(f"Error guardando portfolio.json: {e}")
 
-    def get_total_portfolio_value(self) -> float:
-        """Estima el valor total (capital líquido + valor invertido en posiciones)."""
-        pos_value = sum(
-            p.quantity * p.entry_price 
-            for pos_list in self.positions.values() 
-            for p in pos_list
-        )
-        return self.current_capital + pos_value
+    def sync_with_broker(self, alpaca_client):
+        """Sincroniza el portafolio local con las posiciones reales de Alpaca."""
+        if not alpaca_client:
+            return
+            
+        try:
+            # 1. Sincronizar el capital real disponible
+            account = alpaca_client.get_account()
+            self.current_capital = float(account.cash)
+            
+            # 2. Obtener posiciones reales
+            real_positions = alpaca_client.get_all_positions()
+            real_symbols = []
+            
+            logger.info("🔄 Sincronizando portafolio interno con Alpaca...")
+            logger.info(f"💰 Poder de compra (Cash) actualizado a: ${self.current_capital:,.2f}")
+            
+            for pos in real_positions:
+                # Convertir Alpaca (ej. BTC/USD) a formato interno (BTC-USD)
+                symbol = pos.symbol.replace("/", "-") if "/" in pos.symbol else pos.symbol
+                real_symbols.append(symbol)
+                
+                qty = float(pos.qty)
+                avg_price = float(pos.avg_entry_price)
+                current_price = float(pos.current_price)
+                
+                # Alpaca side es un Enum
+                side_str = "BUY" if "long" in str(pos.side).lower() else "SELL"
+                
+                # Calcular nuevos Stops basados en precio real
+                if side_str == "BUY":
+                    stop_loss = avg_price * (1 - RISK_CONFIG["stop_loss_pct"])
+                    take_profit = avg_price * (1 + RISK_CONFIG["take_profit_pct"])
+                else:
+                    stop_loss = avg_price * (1 + RISK_CONFIG["stop_loss_pct"])
+                    take_profit = avg_price * (1 - RISK_CONFIG["take_profit_pct"])
+                    
+                # Reemplazamos/Consolidamos la posición local con la realidad
+                self.positions[symbol] = [Position(
+                    symbol=symbol,
+                    entry_price=avg_price,
+                    entry_date=str(datetime.now()), 
+                    side=side_str,
+                    quantity=qty,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    highest_price=max(avg_price, current_price),
+                    last_known_price=current_price
+                )]
+                logger.info(f"✅ Sincronizado {symbol}: Qty {qty:,.4f}, Avg Entry ${avg_price:,.4f}")
+                
+            # 3. Eliminar activos locales que ya no existen en Alpaca (excepto Forex)
+            forex_symbols = ASSETS.get("forex", [])
+            symbols_to_remove = []
+            
+            for local_sym in self.positions.keys():
+                if local_sym not in real_symbols and local_sym not in forex_symbols:
+                    logger.warning(f"🗑️ Eliminando {local_sym} del portafolio local (Posición cerrada o no existe en Alpaca).")
+                    symbols_to_remove.append(local_sym)
+                    
+            for sym in symbols_to_remove:
+                del self.positions[sym]
+                
+            # Guardar el estado unificado
+            self.save_portfolio()
+            logger.info("✅ Sincronización completada con éxito.")
+            
+        except Exception as e:
+            logger.error(f"Error sincronizando con Alpaca: {e}")
+
+    def get_total_portfolio_value(self, is_forex: bool = False) -> float:
+        """Estima el valor total (capital líquido + valor invertido) para la cuenta correspondiente."""
+        if is_forex:
+            forex_symbols = ASSETS.get("forex", [])
+            pos_value = sum(
+                p.quantity * p.entry_price 
+                for sym, pos_list in self.positions.items() if sym in forex_symbols
+                for p in pos_list
+            )
+            return self.forex_capital + pos_value
+        else:
+            forex_symbols = ASSETS.get("forex", [])
+            pos_value = sum(
+                p.quantity * p.entry_price 
+                for sym, pos_list in self.positions.items() if sym not in forex_symbols
+                for p in pos_list
+            )
+            return self.current_capital + pos_value
 
     def get_drawdown(self) -> float:
-        """Calcula la pérdida actual vs capital inicial."""
-        current_val = self.get_total_portfolio_value()
+        """Calcula la pérdida actual vs capital inicial (Solo cuenta real por ahora)."""
+        current_val = self.get_total_portfolio_value(is_forex=False)
         if current_val >= self.starting_capital:
             return 0.0
         return (self.starting_capital - current_val) / self.starting_capital
 
-    def _calculate_position_size(self, entry_price: float, stop_loss_price: float) -> float:
-        """Calcula el tamaño de posición basado en riesgo."""
-        risk_amount = self.get_total_portfolio_value() * RISK_CONFIG["risk_per_trade"]
+    def _calculate_position_size(self, entry_price: float, stop_loss_price: float, is_forex: bool = False) -> float:
+        """Calcula el tamaño de posición basado en riesgo y la cuenta correspondiente."""
+        total_value = self.get_total_portfolio_value(is_forex)
+        risk_amount = total_value * RISK_CONFIG["risk_per_trade"]
         price_risk_per_unit = abs(entry_price - stop_loss_price)
         
         if price_risk_per_unit <= 0:
@@ -123,15 +214,33 @@ class RiskManager:
             
         units = risk_amount / price_risk_per_unit
         
-        # Validar que tengamos suficiente capital líquido
-        max_units_affordable = self.current_capital / entry_price
+        # Validar que tengamos suficiente capital líquido en la cuenta correcta
+        available_cash = self.forex_capital if is_forex else self.current_capital
+        max_units_affordable = available_cash / entry_price
         return min(units, max_units_affordable)
 
+    def _get_asset_type(self, symbol: str) -> str:
+        """Determina el tipo de activo basado en la config."""
+        if symbol in ASSETS.get("forex", []):
+            return "forex"
+        if symbol in ASSETS.get("crypto", []) or "-USD" in symbol or "/" in symbol:
+            return "crypto"
+        return "stocks"
+
     def can_open_position(self, symbol: str, price: float) -> bool:
-        """Reglas estrictas anti-amnesia y Promedio DCA."""
-        total_open_trades = sum(len(v) for v in self.positions.values())
-        if total_open_trades >= RISK_CONFIG["max_positions"]:
-            logger.warning(f"[{symbol}] Rechazado: Máximo de posiciones globales alcanzado ({total_open_trades}).")
+        """Reglas estrictas anti-amnesia y límites independientes por sector."""
+        asset_type = self._get_asset_type(symbol)
+        
+        # Contar posiciones actuales de este TIPO
+        open_positions_of_type = sum(
+            1 for sym in self.positions.keys() if self._get_asset_type(sym) == asset_type
+        )
+        
+        # Obtener el límite específico (por defecto 5 si no existe)
+        max_limit = RISK_CONFIG.get("max_positions_per_type", {}).get(asset_type, 5)
+        
+        if open_positions_of_type >= max_limit:
+            logger.warning(f"[{symbol}] Rechazado: Máximo de posiciones alcanzado para {asset_type.upper()} ({open_positions_of_type}/{max_limit}).")
             return False
             
         if symbol in self.positions and len(self.positions[symbol]) > 0:
@@ -164,6 +273,8 @@ class RiskManager:
         if not self.can_open_position(symbol, price):
             return None
         
+        is_forex = self._get_asset_type(symbol) == "forex"
+        
         # Calcular stops
         if side == "BUY":
             stop_loss = price * (1 - RISK_CONFIG["stop_loss_pct"])
@@ -172,7 +283,7 @@ class RiskManager:
             stop_loss = price * (1 + RISK_CONFIG["stop_loss_pct"])
             take_profit = price * (1 - RISK_CONFIG["take_profit_pct"])
             
-        quantity = self._calculate_position_size(price, stop_loss)
+        quantity = self._calculate_position_size(price, stop_loss, is_forex)
         
         if quantity <= 0:
             logger.warning(f"[{symbol}] Capital insuficiente o riesgo demasiado alto.")
@@ -180,12 +291,19 @@ class RiskManager:
             
         cost = quantity * price
         
-        if cost > self.current_capital:
-            logger.warning(f"[{symbol}] Capital líquido insuficiente (${self.current_capital:.2f} < ${cost:.2f})")
-            return None
-            
-        # Ejecutar simulación contable
-        self.current_capital -= cost
+        # Validar y restar saldo de la cuenta correcta
+        if is_forex:
+            if cost > self.forex_capital:
+                logger.warning(f"[{symbol}] Capital Forex insuficiente (${self.forex_capital:.2f} < ${cost:.2f})")
+                return None
+            self.forex_capital -= cost
+            available_capital = self.forex_capital
+        else:
+            if cost > self.current_capital:
+                logger.warning(f"[{symbol}] Capital Alpaca insuficiente (${self.current_capital:.2f} < ${cost:.2f})")
+                return None
+            self.current_capital -= cost
+            available_capital = self.current_capital
         
         position = Position(
             symbol=symbol,
@@ -195,7 +313,8 @@ class RiskManager:
             stop_loss=stop_loss,
             take_profit=take_profit,
             entry_date=entry_date,
-            highest_price=price
+            highest_price=price,
+            last_known_price=price
         )
         
         if symbol not in self.positions:
@@ -206,7 +325,7 @@ class RiskManager:
         # GUARDAR ESTADO
         self.save_portfolio()
         
-        logger.info(f"[{symbol}] Position Size: {quantity:.4f} units | Risk: ${(abs(price-stop_loss)*quantity):.2f} | Capital: ${self.current_capital:.2f}")
+        logger.info(f"[{symbol}] Position Size: {quantity:.4f} units | Risk: ${(abs(price-stop_loss)*quantity):.2f} | Capital Restante: ${available_capital:.2f}")
         logger.info(f"✅ POSICION ABIERTA INTERNA: {side} {quantity:.4f} {symbol} @ {price:.2f} | SL: {stop_loss:.2f} | TP: {take_profit:.2f}")
         
         return position
@@ -227,6 +346,9 @@ class RiskManager:
             sell_reasons = []
             
             for i, pos in enumerate(pos_list):
+                # Guardar el precio actual para mostrar el P&L en tiempo real
+                pos.last_known_price = current_price
+                
                 # 1. Actualizar el "Highest Price" para el Trailing Stop
                 if current_price > pos.highest_price and pos.side == "BUY":
                     pos.highest_price = current_price
@@ -262,7 +384,7 @@ class RiskManager:
                     "details": {"reason": reason, "price": current_price}
                 })
                 
-        # Guardar si hubo actualizaciones de Trailing Stops
+        # Guardar si hubo actualizaciones
         self.save_portfolio()
         return forced_exits
 
@@ -273,6 +395,7 @@ class RiskManager:
             
         total_pnl = 0.0
         total_revenue = 0.0
+        is_forex = self._get_asset_type(symbol) == "forex"
         
         for pos in self.positions[symbol]:
             if pos.side == "BUY":
@@ -293,7 +416,11 @@ class RiskManager:
                 "date": exit_date
             })
             
-        self.current_capital += total_revenue
+        if is_forex:
+            self.forex_capital += total_revenue
+        else:
+            self.current_capital += total_revenue
+            
         del self.positions[symbol]
         
         # GUARDAR ESTADO
@@ -303,23 +430,81 @@ class RiskManager:
         return total_pnl
 
     def print_summary(self):
-        """Imprime resumen del portfolio."""
-        total_value = self.get_total_portfolio_value()
-        pnl = total_value - self.starting_capital
-        pnl_pct = (pnl / self.starting_capital) * 100 if self.starting_capital > 0 else 0
+        """Imprime resumen del portfolio separando real (Alpaca) de simulado (Forex) con PnL flotante."""
+        forex_symbols = ASSETS.get("forex", [])
         
-        print("\n" + "="*60)
-        print("📊 RESUMEN DEL PORTFOLIO (SIMULADOR INTERNO)")
-        print("="*60)
-        print(f"Capital Libre:     ${self.current_capital:,.2f}")
-        print(f"Valor Total Estim: ${total_value:,.2f}")
-        print(f"P&L Total:         ${pnl:,.2f} ({pnl_pct:+.2f}%)")
-        print(f"Activos Abiertos:  {len(self.positions)}")
-        print("-" * 60)
+        # Totales Invertidos (Costo Base)
+        real_invested_cost = 0.0
+        simulated_invested_cost = 0.0
+        
+        # Totales Actuales (Usando último precio conocido)
+        real_current_value = 0.0
+        simulated_current_value = 0.0
+        
+        real_positions_count = 0
+        simulated_positions_count = 0
+        
+        # Cálculos por posición
+        for sym, pos_list in self.positions.items():
+            is_forex = sym in forex_symbols
+            for p in pos_list:
+                cost = p.quantity * p.entry_price
+                
+                # Si tenemos un último precio conocido (actualizado por check_exit_conditions)
+                current_price = p.last_known_price if p.last_known_price > 0 else p.entry_price
+                current_value = p.quantity * current_price
+                
+                if is_forex:
+                    simulated_invested_cost += cost
+                    simulated_current_value += current_value
+                    simulated_positions_count += 1
+                else:
+                    real_invested_cost += cost
+                    real_current_value += current_value
+                    real_positions_count += 1
+                
+        # --- CARTERA REAL (ALPACA) ---
+        real_portfolio_total = self.current_capital + real_current_value
+        pnl_real = real_portfolio_total - self.starting_capital
+        pnl_real_pct = (pnl_real / self.starting_capital) * 100 if self.starting_capital > 0 else 0
+        
+        # --- CARTERA SIMULADA (FOREX) ---
+        forex_portfolio_total = self.forex_capital + simulated_current_value
+        pnl_forex = forex_portfolio_total - self.forex_starting_capital
+        pnl_forex_pct = (pnl_forex / self.forex_starting_capital) * 100 if self.forex_starting_capital > 0 else 0
+        
+        print("\n" + "="*70)
+        print("📊 RESUMEN DE PORTAFOLIOS INDEPENDIENTES")
+        print("="*70)
+        
+        print(f"📈 [1] CUENTA REAL (ALPACA - ACCIONES/CRIPTOS)")
+        print(f"   Saldo Inicial:        ${self.starting_capital:,.2f}")
+        print(f"   Efectivo Libre:       ${self.current_capital:,.2f}")
+        print(f"   Valor Invertido:      ${real_current_value:,.2f} (Costo: ${real_invested_cost:,.2f})")
+        print(f"   Valor Total Actual:   ${real_portfolio_total:,.2f}")
+        print(f"   P&L Flotante Total:   ${pnl_real:,.2f} ({pnl_real_pct:+.2f}%)")
+        print(f"   Posiciones Abiertas:  {real_positions_count} / {RISK_CONFIG.get('max_positions_per_type', {}).get('stocks', 5) + RISK_CONFIG.get('max_positions_per_type', {}).get('crypto', 5)}")
+        print("-" * 70)
+        
+        print(f"🕹️ [2] CUENTA SIMULADA (FOREX)")
+        print(f"   Saldo Inicial:        ${self.forex_starting_capital:,.2f}")
+        print(f"   Efectivo Libre:       ${self.forex_capital:,.2f}")
+        print(f"   Valor Invertido:      ${simulated_current_value:,.2f} (Costo: ${simulated_invested_cost:,.2f})")
+        print(f"   Valor Total Actual:   ${forex_portfolio_total:,.2f}")
+        print(f"   P&L Flotante Total:   ${pnl_forex:,.2f} ({pnl_forex_pct:+.2f}%)")
+        print(f"   Posiciones Abiertas:  {simulated_positions_count} / {RISK_CONFIG.get('max_positions_per_type', {}).get('forex', 5)}")
+        print("=" * 70)
         
         for sym, pos_list in self.positions.items():
             total_qty = sum(p.quantity for p in pos_list)
             avg_price = sum(p.entry_price * p.quantity for p in pos_list) / total_qty
-            print(f" • {sym:8} | Qty: {total_qty:.4f} | Avg Entry: ${avg_price:,.4f} | Compras: {len(pos_list)}")
             
-        print("="*60 + "\n")
+            # Obtener P&L individual
+            last_price = pos_list[0].last_known_price if pos_list[0].last_known_price > 0 else avg_price
+            indiv_pnl = (last_price - avg_price) * total_qty
+            indiv_pnl_pct = ((last_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0
+            
+            tag = "[SIM_FOREX]" if sym in forex_symbols else "[REAL_ALPACA]"
+            print(f" • {sym:8} {tag:13} | Qty: {total_qty:10.4f} | Avg Entry: ${avg_price:,.4f} | P&L: {indiv_pnl_pct:+.2f}%")
+            
+        print("="*70 + "\n")

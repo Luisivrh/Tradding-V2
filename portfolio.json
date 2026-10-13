@@ -1,43 +1,21 @@
 {
-    "current_capital": 1.0686562745831907e-11,
+    "starting_capital": 20000,
+    "current_capital": 26353.00585423943,
+    "forex_starting_capital": 10000,
+    "forex_capital": 10000,
     "positions": {
-        "SBFM": [
-            {
-                "symbol": "SBFM",
-                "entry_price": 0.7,
-                "entry_date": "2026-10-07 17:57:41.717349",
-                "side": "BUY",
-                "quantity": 2857.1428571428546,
-                "stop_loss": 0.6649999999999999,
-                "take_profit": 0.7525,
-                "trailing_stop_triggered": 0.0,
-                "highest_price": 0.7
-            }
-        ],
-        "GGROW": [
-            {
-                "symbol": "GGROW",
-                "entry_price": 0.003,
-                "entry_date": "2026-10-07 17:57:42.593086",
-                "side": "BUY",
-                "quantity": 666666.6666666669,
-                "stop_loss": 0.003724,
-                "take_profit": 0.003225,
-                "trailing_stop_triggered": 0.0,
-                "highest_price": 0.0038
-            }
-        ],
         "SDSTW": [
             {
                 "symbol": "SDSTW",
-                "entry_price": 0.0678,
-                "entry_date": "2026-10-07 17:57:43.121488",
+                "entry_price": 0.0999,
+                "entry_date": "2026-10-12 11:49:09.399069",
                 "side": "BUY",
-                "quantity": 29498.525073746277,
-                "stop_loss": 0.06441,
-                "take_profit": 0.07288499999999999,
+                "quantity": 29498.0,
+                "stop_loss": 0.094905,
+                "take_profit": 0.1073925,
                 "trailing_stop_triggered": 0.0,
-                "highest_price": 0.0678
+                "highest_price": 0.0999,
+                "last_known_price": 0.0973
             }
         ],
         "EURUSD=X": [
@@ -50,7 +28,8 @@
                 "stop_loss": 1.06759575,
                 "take_profit": 1.208068875,
                 "trailing_stop_triggered": 0.0,
-                "highest_price": 1.123785
+                "highest_price": 1.123785,
+                "last_known_price": 1.120995
             }
         ],
         "AUDUSD=X": [
@@ -60,12 +39,97 @@
                 "entry_date": "2026-10-07 17:57:44.049364",
                 "side": "BUY",
                 "quantity": 2867.918034902556,
-                "stop_loss": 0.6625015,
+                "stop_loss": 0.6842360000000001,
                 "take_profit": 0.74967275,
                 "trailing_stop_triggered": 0.0,
-                "highest_price": 0.69737
+                "highest_price": 0.6982,
+                "last_known_price": 0.6982
+            }
+        ],
+        "AMZN": [
+            {
+                "symbol": "AMZN",
+                "entry_price": 251.404078,
+                "entry_date": "2026-10-12 11:49:09.392607",
+                "side": "BUY",
+                "quantity": 43.734096692,
+                "stop_loss": 238.83387409999997,
+                "take_profit": 270.25938385,
+                "trailing_stop_triggered": 0.0,
+                "highest_price": 259.78,
+                "last_known_price": 259.74
+            }
+        ],
+        "TSLA": [
+            {
+                "symbol": "TSLA",
+                "entry_price": 379.8,
+                "entry_date": "2026-10-12 11:49:09.399069",
+                "side": "BUY",
+                "quantity": 13.202017268,
+                "stop_loss": 360.81,
+                "take_profit": 408.28499999999997,
+                "trailing_stop_triggered": 0.0,
+                "highest_price": 379.8,
+                "last_known_price": 379.27
+            }
+        ],
+        "NIVFW": [
+            {
+                "symbol": "NIVFW",
+                "entry_price": 0.0119,
+                "entry_date": "2026-10-12 11:50:52.480330",
+                "side": "BUY",
+                "quantity": 1269157.212006748,
+                "stop_loss": 0.011305,
+                "take_profit": 0.0127925,
+                "trailing_stop_triggered": 0.0,
+                "highest_price": 0.0119,
+                "last_known_price": 0.0119
+            }
+        ],
+        "OFAL": [
+            {
+                "symbol": "OFAL",
+                "entry_price": 0.3831,
+                "entry_date": "2026-10-12 11:50:55.977137",
+                "side": "BUY",
+                "quantity": 39423.05096027219,
+                "stop_loss": 0.36394499999999996,
+                "take_profit": 0.4118325,
+                "trailing_stop_triggered": 0.0,
+                "highest_price": 0.3831,
+                "last_known_price": 0.3831
             }
         ]
     },
-    "trade_history": []
+    "trade_history": [
+        {
+            "symbol": "SBFM",
+            "side": "BUY",
+            "entry_price": 0.4664,
+            "exit_price": 0.3227,
+            "pnl": -410.55089999999996,
+            "reason": "SELL_SIGNAL",
+            "date": "2026-10-12 11:29:52.687448"
+        },
+        {
+            "symbol": "GGROW",
+            "side": "BUY",
+            "entry_price": 0.006,
+            "exit_price": 0.0025,
+            "pnl": -2333.331,
+            "reason": "SELL_SIGNAL",
+            "date": "2026-10-12 11:29:55.804778"
+        },
+        {
+            "symbol": "GGROW",
+            "side": "BUY",
+            "entry_price": 0.0053,
+            "exit_price": 0.0025,
+            "pnl": -21798.097999999998,
+            "reason": "SELL_SIGNAL",
+            "date": "2026-10-12 11:50:52.126894"
+        }
+    ]
 }

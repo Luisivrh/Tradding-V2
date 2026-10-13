@@ -114,6 +114,9 @@ class TradingBot:
                     # Validar conexión
                     account = self.alpaca_client.get_account()
                     logger.info(f"[OK] Alpaca Client conectado. Capital disponible: ${account.cash}")
+                    
+                    # Sincronizar portafolio interno con broker
+                    self.risk_manager.sync_with_broker(self.alpaca_client)
             except Exception as e:
                 logger.error(f"Error conectando a Brokers: {e}")
                 self.live_trading = False
@@ -378,10 +381,11 @@ class TradingBot:
                     is_valid = False
                     reasons.append(f"Score insuficiente ({opp['score']:.2f} < {SIGNAL_CONFIG['sell_threshold']:.2f})")
             
-            # Validación 2: Riesgo del portfolio
-            if is_valid and len(self.risk_manager.positions) >= RISK_CONFIG["max_positions"]:
+            # Validación 2: Riesgo del portfolio (Límite global sumando los tipos)
+            total_max_positions = sum(RISK_CONFIG.get("max_positions_per_type", {}).values())
+            if is_valid and len(self.risk_manager.positions) >= total_max_positions:
                 is_valid = False
-                reasons.append(f"Portfolio lleno ({len(self.risk_manager.positions)} posiciones)")
+                reasons.append(f"Portfolio lleno ({len(self.risk_manager.positions)} posiciones globales)")
             
             # Validación 3: Drawdown máximo
             if is_valid and self.risk_manager.get_drawdown() < -RISK_CONFIG["max_drawdown"]:

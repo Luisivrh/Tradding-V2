@@ -20,7 +20,7 @@ ASSETS = {
     "crypto": ["BTC-USD", "ETH-USD", "SOL-USD", "ADA-USD", "BNB-USD", "XRP-USD", "DOT-USD"],
     
     # ACCIONES TECH Y ETFs (AlphaVantage/Tiingo)
-    "stocks": ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "SPY", "QQQ"],
+    "stocks": ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "SPY", "QQQ", "NU"],
     
     # DIVISAS (Forex vía Tiingo - tickers sin guion)
     "forex": ["EURUSD=X", "GBPUSD=X", "JPY=X", "AUDUSD=X", "USDMXN=X", "EURMXN=X", "GBPMXN=X", "CADMXN=X" ],
@@ -31,7 +31,7 @@ ASSETS = {
 # ==========================================
 SCREENER_CONFIG = {
     "enabled": True,
-    "max_dynamic_stocks": 10, # Máximo de acciones nuevas a agregar por escaneo
+    "max_dynamic_stocks": 30, # Máximo de acciones nuevas a agregar por escaneo
     "sources": ["alpaca", "yahoo"], # Orden de prioridad
 }
 
@@ -95,19 +95,24 @@ SIGNAL_CONFIG = {
 # ==========================================
 RISK_CONFIG = {
     # Portfolio
-    "starting_capital": 20000,      # Capital inicial simulado
-    "risk_per_trade": 0.01,         # Riesgo por trade = 1.0% del capital ($100 max perdida)
-    "max_positions": 5,             # Maximo de posiciones simultaneas
+    "starting_capital": 100000,     # Capital inicial Alpaca/Criptos (Real)
+    "forex_starting_capital": 10000, # Capital inicial para simulador Forex
+    "risk_per_trade": 0.005,         # Riesgo por trade = 0.5% del capital (permite más posiciones)
+    "max_positions_per_type": {     # Maximo de posiciones simultaneas por grupo
+        "stocks": 10,
+        "crypto": 5,
+        "forex": 5
+    },
     "max_drawdown": 0.15,           # Detener si pierde 15% del capital
-    
+
     # Stop Loss y Take Profit
     "stop_loss_pct": 0.05,          # 5% por debajo del entry (Da mas respiro a la accion)
     "take_profit_pct": 0.075,       # 7.5% por encima del entry (Ratio Riesgo/Beneficio 1:1.5)
-    
+
     # Trailing Stop
     "trailing_stop_enabled": True,
     "trailing_stop_pct": 0.02,      # Seguir ganancias con 2%
-    
+
     # Time-based exit
     "max_hold_days": 30,            # Cerrar si pasa 1 mes
 }
