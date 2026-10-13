@@ -91,28 +91,65 @@ SIGNAL_CONFIG = {
 }
 
 # ==========================================
+# MICROESTRUCTURA Y CATEGORIZACION DE ACTIVOS
+# ==========================================
+MICROSTRUCTURE_CONFIG = {
+    # Definición de riesgo, spread máximo y multiplicadores ATR por categoría
+    "warrant": {
+        "max_pos_pct": 0.02,        # Máximo 2% del capital en 1 warrant
+        "max_spread_pct": 0.15,     # Rechazar si el spread Bid/Ask > 15%
+        "atr_sl_mult": 3.5,         # Stop Loss inicial a 3.5x ATR
+        "atr_ts_mult": 3.0          # Trailing Stop a 3.0x ATR
+    },
+    "penny": {
+        "max_pos_pct": 0.03,        # Máximo 3% del capital en 1 penny stock
+        "max_spread_pct": 0.08,     # Rechazar si el spread > 8%
+        "atr_sl_mult": 2.5,
+        "atr_ts_mult": 2.0
+    },
+    "normal": {
+        "max_pos_pct": 0.05,        # Máximo 5% del capital
+        "max_spread_pct": 0.02,     # Rechazar si el spread > 2%
+        "atr_sl_mult": 2.0,
+        "atr_ts_mult": 1.5
+    },
+    "crypto": {
+        "max_pos_pct": 0.05,
+        "max_spread_pct": 0.03,
+        "atr_sl_mult": 2.5,
+        "atr_ts_mult": 2.0
+    },
+    "forex": {
+        "max_pos_pct": 0.05,
+        "max_spread_pct": 0.01,
+        "atr_sl_mult": 1.5,
+        "atr_ts_mult": 1.0
+    }
+}
+
+# ==========================================
 # GESTION DE RIESGOS
 # ==========================================
 RISK_CONFIG = {
     # Portfolio
-    "starting_capital": 100000,     # Capital inicial Alpaca/Criptos (Real)
-    "forex_starting_capital": 10000, # Capital inicial para simulador Forex
-    "risk_per_trade": 0.005,         # Riesgo por trade = 0.5% del capital (permite más posiciones)
-    "max_positions_per_type": {     # Maximo de posiciones simultaneas por grupo
-        "stocks": 10,
+    "starting_capital": 100000,
+    "forex_starting_capital": 10000,
+    "risk_per_trade": 0.01,         # Riesgamos 1% del capital base por trade (Risk Parity)
+    "max_positions_per_type": {
+        "stocks": 15,
         "crypto": 5,
         "forex": 5
     },
     "max_drawdown": 0.15,           # Detener si pierde 15% del capital
 
-    # Stop Loss y Take Profit
-    "stop_loss_pct": 0.05,          # 5% por debajo del entry (Da mas respiro a la accion)
-    "take_profit_pct": 0.075,       # 7.5% por encima del entry (Ratio Riesgo/Beneficio 1:1.5)
+    # Los Stops fijos ya no se usan directamente, se usa ATR.
+    # Se mantienen por si falla el calculo del ATR (Fallback)
+    "stop_loss_pct": 0.10,          
+    "take_profit_pct": 0.20,
 
-    # Trailing Stop
+    # Trailing Stop adaptativo basado en ATR activo por defecto
     "trailing_stop_enabled": True,
-    "trailing_stop_pct": 0.02,      # Seguir ganancias con 2%
-
+    
     # Time-based exit
     "max_hold_days": 30,            # Cerrar si pasa 1 mes
 }

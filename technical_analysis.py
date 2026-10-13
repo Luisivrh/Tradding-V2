@@ -292,10 +292,12 @@ class SignalAnalyzer:
         else:
             return 0  # Tendencia débil
     
-    def calculate_signal_score(self, signal_type: str = "BUY") -> float:
+    def calculate_signal_score(self) -> float:
         """
-        Calcula score total de la señal (0-10).
-        signal_type: "BUY" o "SELL"
+        Calcula score total de la señal en escala absoluta (0-10).
+        10.0 = Extremadamente Alcista (BUY)
+        5.0  = Neutral
+        0.0  = Extremadamente Bajista (SELL)
         """
         trend_score = self._score_trend()
         momentum_score = self._score_momentum()
@@ -315,10 +317,6 @@ class SignalAnalyzer:
             (multi_tf_score / 2 * weights["multi_timeframe"])
         ) / total_weight * 10
         
-        # Invertir score para SELL
-        if signal_type == "SELL":
-            final_score = 10 - final_score
-        
         self.score = {
             "total": final_score,
             "trend": trend_score,
@@ -333,8 +331,8 @@ class SignalAnalyzer:
     def evaluate_signal(self) -> Tuple[Optional[str], float, dict]:
         """
         Estrategia Profesional de Scoring (0-10):
-        Calcula un puntaje basado en múltiples factores técnicos.
-        Si el score >= 6.5 es BUY. Si el score <= 3.5 es SELL.
+        Si el score >= buy_threshold es BUY. 
+        Si el score <= sell_threshold (ej. 3.5) es SELL.
         """
         price = self.latest["Close"]
         
@@ -343,29 +341,27 @@ class SignalAnalyzer:
             "rsi": self.latest["RSI"],
             "macd": self.latest["MACD"],
             "adx": self.latest["ADX"],
+            "atr": self.latest.get("ATR", 0.0),
             "volume_ratio": self.latest["Volume"] / self.latest["Volume_SMA"] if self.latest["Volume_SMA"] > 0 else 0,
         }
         
-        # Calcular el score ponderado real (0 a 10) usando la función interna
-        buy_score = self.calculate_signal_score(signal_type="BUY")
-        sell_score = self.calculate_signal_score(signal_type="SELL")
+        # Calcular el score ponderado real en escala absoluta (0 a 10)
+        absolute_score = self.calculate_signal_score()
         
-        details.update(self.score) # Añade el desglose del score (trend, momentum, etc)
+        details.update(self.score)
         
-        # Lógica de decisión dinámica basada en umbrales configurables
         from config import SIGNAL_CONFIG
         buy_threshold = SIGNAL_CONFIG.get("buy_threshold", 6.5)
-        sell_threshold = SIGNAL_CONFIG.get("sell_threshold", 6.5) # Asumimos simetría si no está especificado
+        # Umbral simétrico de venta (Si comprar es >= 7.0, vender es <= 3.0)
+        sell_threshold = 10.0 - SIGNAL_CONFIG.get("sell_threshold", 6.5) 
         
-        if buy_score >= buy_threshold:
-            return "BUY", buy_score, details
+        if absolute_score >= buy_threshold:
+            return "BUY", absolute_score, details
             
-        if sell_score >= sell_threshold:
-            return "SELL", sell_score, details
+        if absolute_score <= sell_threshold:
+            return "SELL", absolute_score, details
             
-        # Si no llega al umbral, devolvemos NINGUNA, pero entregamos el score actual (el más alto)
-        max_score = max(buy_score, sell_score)
-        return None, max_score, details
+        return None, absolute_score, details
     
     def print_analysis(self):
         """Imprime análisis detallado sin emojis."""

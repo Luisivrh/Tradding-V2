@@ -41,6 +41,7 @@ from risk_management import RiskManager
 from backtester import BacktestRunner
 from ai_analyzer import AIAnalyzer
 from telegram_bot import TelegramNotifier
+from post_mortem import PostMortemAnalyzer
 
 import ccxt
 import requests
@@ -93,6 +94,7 @@ class TradingBot:
         self.signals_detected = []
         self.trades_executed = []
         self.evaluations_log = []
+        self.post_mortem = PostMortemAnalyzer(self.data_fetcher)
         
         # Configurar clientes de Brokers si está habilitado el Live Trading
         self.live_trading = BROKERS_CONFIG["live_trading_enabled"]
@@ -200,7 +202,7 @@ class TradingBot:
                         
                         group_technical_data[symbol] = details
                         group_analyzers[symbol] = analyzer
-                        current_prices_dict[symbol] = details["price"]
+                        current_prices_dict[symbol] = details
                     except Exception as e:
                         logger.error(f"[{symbol}] Error en análisis técnico: {e}")
                         self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Técnico")
@@ -227,7 +229,7 @@ class TradingBot:
                         
                         group_technical_data[symbol] = details
                         group_analyzers[symbol] = analyzer
-                        current_prices_dict[symbol] = details["price"]
+                        current_prices_dict[symbol] = details
                     except Exception as e:
                         logger.error(f"[{symbol}] Error en análisis técnico: {e}")
                         self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Técnico")
@@ -253,7 +255,7 @@ class TradingBot:
                         
                         group_technical_data[symbol] = details
                         group_analyzers[symbol] = analyzer
-                        current_prices_dict[symbol] = details["price"]
+                        current_prices_dict[symbol] = details
                     except Exception as e:
                         logger.error(f"[{symbol}] Error en análisis técnico: {e}")
                         self.evaluations_log.append(f"❌ {symbol:6} | ERROR: Técnico")
@@ -359,53 +361,93 @@ class TradingBot:
     def validate_signals_with_context(self, opportunities: List[Dict]) -> List[Dict]:
         """
         Valida señales con análisis de contexto:
-        - Tendencia global del mercado
-        - Eventos macroeconómicos (opcional)
-        - Correlaciones entre activos
+        - Las ventas de emergencia NUNCA se filtran.
+        - Las ventas técnicas se validan por su umbral invertido (ej. <= 3.5).
+        - Las compras se validan por score, drawdown y límite de posiciones.
         """
         logger.info("📋 Validando señales con análisis de contexto...\n")
         
         validated = []
+        self.validation_log = [] # Guardar para Telegram
         
         for opp in opportunities:
             is_valid = True
             reasons = []
             
-            # Validación 1: Score mínimo
+            # 1. Bypass para salidas forzosas (Stop Loss, Take Profit, Timeout)
+            if opp["signal_type"] == "SELL" and opp.get("details", {}).get("reason") is not None:
+                validated.append(opp)
+                msg = f"✅ {opp['symbol']}: VENTA FORZOSA AUTORIZADA ({opp['details']['reason']})"
+                logger.info(msg)
+                self.validation_log.append(msg)
+                continue
+            
+            # 2. Validación de umbrales para señales orgánicas
             if opp["signal_type"] == "BUY":
                 if opp["score"] < SIGNAL_CONFIG["buy_threshold"]:
                     is_valid = False
                     reasons.append(f"Score insuficiente ({opp['score']:.2f} < {SIGNAL_CONFIG['buy_threshold']:.2f})")
-            else:
-                if opp["score"] < SIGNAL_CONFIG["sell_threshold"]:
+            else: # SELL orgánico
+                # Solo vender si ya tenemos el activo
+                if opp["symbol"] not in self.risk_manager.positions:
                     is_valid = False
-                    reasons.append(f"Score insuficiente ({opp['score']:.2f} < {SIGNAL_CONFIG['sell_threshold']:.2f})")
+                    reasons.append(f"No hay posición abierta para vender")
+                else:
+                    sell_thresh = 10.0 - SIGNAL_CONFIG.get("sell_threshold", 6.5)
+                    if opp["score"] > sell_thresh:
+                        is_valid = False
+                        reasons.append(f"Score insuficiente para venta bajista ({opp['score']:.2f} > {sell_thresh:.2f})")
             
-            # Validación 2: Riesgo del portfolio (Límite global sumando los tipos)
-            total_max_positions = sum(RISK_CONFIG.get("max_positions_per_type", {}).values())
-            if is_valid and len(self.risk_manager.positions) >= total_max_positions:
-                is_valid = False
-                reasons.append(f"Portfolio lleno ({len(self.risk_manager.positions)} posiciones globales)")
-            
-            # Validación 3: Drawdown máximo
-            if is_valid and self.risk_manager.get_drawdown() < -RISK_CONFIG["max_drawdown"]:
-                is_valid = False
-                reasons.append(f"Drawdown máximo alcanzado ({self.risk_manager.get_drawdown()*100:.2f}%)")
+            # 3. Validación de Capacidad (Solo aplica para COMPRAS)
+            if is_valid and opp["signal_type"] == "BUY":
+                total_max_positions = sum(RISK_CONFIG.get("max_positions_per_type", {}).values())
+                if len(self.risk_manager.positions) >= total_max_positions:
+                    is_valid = False
+                    reasons.append(f"Portfolio lleno ({len(self.risk_manager.positions)} posiciones globales)")
+                
+                # Validación de Drawdown
+                if self.risk_manager.get_drawdown() < -RISK_CONFIG["max_drawdown"]:
+                    is_valid = False
+                    reasons.append(f"Drawdown máximo alcanzado ({self.risk_manager.get_drawdown()*100:.2f}%)")
             
             if is_valid:
                 validated.append(opp)
-                logger.info(f"✅ {opp['symbol']}: VÁLIDO (Score: {opp['score']:.2f})")
+                msg = f"✅ {opp['symbol']}: VÁLIDO (Score: {opp['score']:.2f})"
+                logger.info(msg)
+                self.validation_log.append(msg)
             else:
-                logger.info(f"❌ {opp['symbol']}: RECHAZADO ({', '.join(reasons)})")
+                msg = f"❌ {opp['symbol']}: RECHAZADO ({', '.join(reasons)})"
+                logger.info(msg)
+                self.validation_log.append(msg)
         
         logger.info("")
         return validated
     
+    def _get_real_time_quote(self, symbol: str) -> dict:
+        """Obtiene la cotización en tiempo real (Bid/Ask) desde Alpaca para calcular el spread."""
+        if not self.live_trading or not self.alpaca_client:
+            return {"bid": 0, "ask": 0, "spread_pct": 0.0, "price": 0}
+            
+        try:
+            # Reutilizamos el data_client inicializado en data_fetcher
+            from alpaca.data.requests import StockLatestQuoteRequest
+            alpaca_symbol = symbol.replace("-USD", "/USD") if "-USD" in symbol else symbol
+            req = StockLatestQuoteRequest(symbol_or_symbols=alpaca_symbol)
+            quote = self.data_fetcher.alpaca_client.get_stock_latest_quote(req)
+            if alpaca_symbol in quote:
+                q = quote[alpaca_symbol]
+                bid = float(q.bid_price)
+                ask = float(q.ask_price)
+                if bid > 0 and ask > bid:
+                    spread = (ask - bid) / bid
+                    return {"bid": bid, "ask": ask, "spread_pct": spread, "price": ask}
+        except Exception as e:
+            logger.warning(f"No se pudo obtener quote en vivo para {symbol}: {e}")
+        return {"bid": 0, "ask": 0, "spread_pct": 0.0, "price": 0}
+
     def execute_trades(self, validated_opportunities: List[Dict]) -> List[Dict]:
         """
-        Ejecuta trades basado en oportunidades validadas.
-        Usa Alpaca para Criptos y Acciones si el Live Trading está habilitado.
-        Usa simulación interna (RiskManager) para Forex o si Live Trading es False.
+        Ejecuta trades basado en oportunidades validadas usando Órdenes Limitadas.
         """
         logger.info("📊 Ejecutando trades...\n")
         
@@ -413,131 +455,207 @@ class TradingBot:
         
         for opp in validated_opportunities:
             symbol = opp["symbol"]
-            price = opp["current_price"]
             signal_type = opp["signal_type"]
+            score = opp["score"]
+            details = opp.get("details", {})
+            
+            # Obtener cotización en tiempo real para evaluar Spread
+            quote = self._get_real_time_quote(symbol)
+            spread_pct = quote["spread_pct"] if quote["spread_pct"] > 0 else 0.001
+            
+            # Determinar precio de ejecución: Midpoint para no pagar el spread completo
+            if quote["bid"] > 0 and quote["ask"] > 0:
+                execution_price = (quote["bid"] + quote["ask"]) / 2.0
+            else:
+                execution_price = opp["current_price"]
+                
+            atr = details.get("atr", execution_price * 0.05)
             
             try:
-                # 1. Simulación Interna (Paper Trading Interno)
-                # Siempre registramos la posición en el RiskManager local para llevar control
                 if signal_type == "BUY":
                     position = self.risk_manager.open_position(
-                        symbol,
-                        price,
+                        symbol=symbol,
+                        price=execution_price,
                         side="BUY",
+                        atr=atr,
+                        spread_pct=spread_pct,
+                        score=score,
                         entry_date=str(datetime.now())
                     )
                     
                     if not position:
-                        continue # No se pudo abrir (ej. sin fondos)
+                        continue 
                         
                     qty_to_buy = position.quantity
-                    
-                    # 2. Ejecución Real en el Broker (Alpaca)
-                    # Solo enviamos la orden si está activado el live_trading Y NO es Forex
+                    cost = qty_to_buy * execution_price
                     is_forex = symbol in ASSETS.get("forex", [])
                     is_crypto = "-USD" in symbol or "/" in symbol or symbol in ASSETS.get("crypto", [])
                     
-                    logger.warning(f"[DEBUG EJECUCION] Symbol: {symbol} | Live: {self.live_trading} | Alpaca Client: {bool(self.alpaca_client)} | is_forex: {is_forex} | is_crypto: {is_crypto}")
-                    
                     if self.live_trading and self.alpaca_client and not is_forex:
                         try:
-                            from alpaca.trading.requests import MarketOrderRequest
+                            from alpaca.trading.requests import LimitOrderRequest
                             from alpaca.trading.enums import OrderSide, TimeInForce
                             
-                            # Limpiar símbolo para Alpaca (Ej. BTC-USD -> BTC/USD)
                             alpaca_symbol = symbol.replace("-USD", "/USD") if "-USD" in symbol else symbol
+                            qty_final = float(qty_to_buy) if is_crypto else float(math.floor(qty_to_buy))
                             
-                            # Validar que la cantidad sea un entero si es una acción, o float si es cripto
-                            # Alpaca solo permite acciones fraccionadas de símbolos populares. 
-                            # Para evitar rechazos en penny stocks o warrants, forzamos enteros.
-                            if not is_crypto:
-                                qty_final = float(math.floor(qty_to_buy))
-                                if qty_final < 1.0:
-                                    logger.warning(f"Cantidad a comprar de {symbol} es menor a 1. Se omitirá orden en Alpaca.")
-                                    continue
-                            else:
-                                qty_final = float(qty_to_buy)
-                                if qty_final < 0.0001:
-                                    qty_final = 0.0001
+                            if qty_final >= (0.0001 if is_crypto else 1.0):
+                                logger.info(f"Enviando LIMIT ORDER a Alpaca: BUY {qty_final} {alpaca_symbol} @ {execution_price:.4f}")
                                 
-                            logger.info(f"Enviando orden a Alpaca: BUY {qty_final} {alpaca_symbol}")
-                            
-                            market_order_data = MarketOrderRequest(
-                                symbol=alpaca_symbol,
-                                qty=qty_final,
-                                side=OrderSide.BUY,
-                                time_in_force=TimeInForce.DAY
-                            )
-                            
-                            # Ejecutar orden
-                            market_order = self.alpaca_client.submit_order(order_data=market_order_data)
-                            logger.info(f"✅ Orden Alpaca confirmada. ID: {market_order.id}")
+                                limit_order_data = LimitOrderRequest(
+                                    symbol=alpaca_symbol,
+                                    qty=qty_final,
+                                    side=OrderSide.BUY,
+                                    time_in_force=TimeInForce.DAY,
+                                    limit_price=round(execution_price, 4)
+                                )
+                                market_order = self.alpaca_client.submit_order(order_data=limit_order_data)
+                                logger.info(f"✅ Orden Limitada Confirmada. ID: {market_order.id}")
                         except Exception as e_alpaca:
-                            logger.error(f"❌ Error en la nube de Alpaca para {symbol}: {e_alpaca}")
+                            logger.error(f"❌ Error en Alpaca para {symbol}: {e_alpaca}")
                     
-                    # 3. Registrar éxito
                     executed_trades.append({
                         "timestamp": datetime.now(),
                         "symbol": symbol,
                         "action": "BUY",
-                        "price": price,
+                        "price": execution_price,
                         "quantity": qty_to_buy,
-                        "status": "REAL (Alpaca)" if (self.live_trading and not is_forex) else "SIMULADO"
+                        "status": "REAL (Limit)" if (self.live_trading and not is_forex) else "SIMULADO"
                     })
                     
-                    # 4. Alerta de Telegram
-                    self.telegram.send_trade_alert(
+                    self.telegram.send_buy_alert(
                         symbol=symbol, 
-                        action="BUY", 
-                        price=price, 
-                        score=opp["score"], 
-                        qty=qty_to_buy, 
+                        asset_type=position.asset_type,
+                        price=execution_price, 
+                        qty=qty_to_buy,
+                        cost=cost,
+                        score=score,
+                        atr=atr,
+                        spread=spread_pct,
+                        reason="SEÑAL_TÉCNICA",
                         is_real=(self.live_trading and not is_forex)
                     )
                 
                 elif signal_type == "SELL":
-                    # En producción: buscar posición abierta y cerrar
                     if symbol in self.risk_manager.positions:
-                        # self.risk_manager.positions[symbol] es una lista de posiciones
-                        total_qty_to_sell = sum(pos.quantity for pos in self.risk_manager.positions[symbol])
+                        pos_list = self.risk_manager.positions[symbol]
+                        total_qty_to_sell = sum(pos.quantity for pos in pos_list)
+                        avg_entry = sum(pos.entry_price * pos.quantity for pos in pos_list) / total_qty_to_sell
                         
-                        # Cerrar en el simulador interno
-                        self.risk_manager.close_position(
-                            symbol,
-                            price,
-                            reason="SELL_SIGNAL",
-                            exit_date=str(datetime.now())
+                        # Si es salida forzosa (Stop Loss / TP / Timeout), reason vendrá en details
+                        reason = details.get("reason", "SEÑAL_TÉCNICA_SELL")
+                        
+                        # Vender a Limit (Midpoint) o Mercado dependiendo de la urgencia
+                        limit_price = quote["bid"] if reason.startswith("STOP") else execution_price
+                        
+                        pnl = self.risk_manager.close_position(
+                            symbol=symbol,
+                            price=limit_price,
+                            reason=reason,
+                            exit_date=str(datetime.now()),
+                            exit_atr=atr,
+                            exit_spread=spread_pct,
+                            exit_score=score
                         )
                         
-                        # Cerrar en Alpaca
                         is_forex = symbol in ASSETS.get("forex", [])
+                        is_crypto = "-USD" in symbol or "/" in symbol or symbol in ASSETS.get("crypto", [])
+                        
+                        # Fix para Alpaca: No enviar decimales en acciones
+                        qty_final_sell = float(total_qty_to_sell) if is_crypto else float(math.floor(total_qty_to_sell))
+                        
                         if self.live_trading and self.alpaca_client and not is_forex:
                             try:
-                                from alpaca.trading.requests import MarketOrderRequest
-                                from alpaca.trading.enums import OrderSide, TimeInForce
+                                from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, GetOrdersRequest
+                                from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
                                 
                                 alpaca_symbol = symbol.replace("-USD", "/USD") if "-USD" in symbol else symbol
-                                logger.info(f"Enviando orden a Alpaca: SELL {total_qty_to_sell} {alpaca_symbol}")
                                 
-                                market_order_data = MarketOrderRequest(
-                                    symbol=alpaca_symbol,
-                                    qty=float(total_qty_to_sell),
-                                    side=OrderSide.SELL,
-                                    time_in_force=TimeInForce.DAY
-                                )
-                                market_order = self.alpaca_client.submit_order(order_data=market_order_data)
-                                logger.info(f"✅ Orden Alpaca confirmada. ID: {market_order.id}")
+                                # 1. Buscar y evaluar órdenes abiertas previas para este símbolo
+                                skip_new_order = False
+                                try:
+                                    logger.info(f"Buscando órdenes pendientes para {alpaca_symbol}...")
+                                    req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[alpaca_symbol])
+                                    open_orders = self.alpaca_client.get_orders(filter=req)
+                                    for order in open_orders:
+                                        # Solo analizamos si la orden abierta es de Venta
+                                        if str(order.side).lower() == "sell" or order.side == OrderSide.SELL:
+                                            # Si es emergencia, destruir y escapar
+                                            if "STOP" in reason:
+                                                logger.info(f"Emergencia: Cancelando orden previa {order.id} para escapar a mercado.")
+                                                self.alpaca_client.cancel_order_by_id(order.id)
+                                            else:
+                                                # Venta técnica, evaluar si vale la pena perder el lugar en la fila
+                                                if order.limit_price is not None:
+                                                    old_limit = float(order.limit_price)
+                                                    diff_pct = abs(old_limit - limit_price) / old_limit if old_limit > 0 else 1.0
+                                                    
+                                                    if diff_pct <= 0.02: # 2% de tolerancia
+                                                        logger.info(f"Orden existente ({order.id}) a ${old_limit:.4f} es óptima (Dif: {diff_pct*100:.1f}%). Manteniendo prioridad en Order Book.")
+                                                        skip_new_order = True
+                                                    else:
+                                                        logger.info(f"Orden a ${old_limit:.4f} obsoleta (Nuevo: ${limit_price:.4f}). Cancelando...")
+                                                        self.alpaca_client.cancel_order_by_id(order.id)
+                                                else:
+                                                    logger.info(f"Orden de mercado/stop previa detectada. Cancelando para limpiar...")
+                                                    self.alpaca_client.cancel_order_by_id(order.id)
+                                except Exception as e_cancel:
+                                    logger.warning(f"Error evaluando órdenes previas para {alpaca_symbol}: {e_cancel}")
+                                
+                                # 2. Enviar la nueva orden de venta (Solo si no decidimos conservar la vieja)
+                                if not skip_new_order:
+                                    # Si es un Stop Loss de emergencia en un Warrant, a veces es mejor Limit al Bid.
+                                    # Por seguridad para asegurar salida de emergencia usamos Market si es STOP, sino Limit.
+                                    if "STOP" in reason:
+                                        logger.info(f"Enviando MARKET ORDER a Alpaca (Emergencia): SELL {qty_final_sell} {alpaca_symbol}")
+                                        order_data = MarketOrderRequest(
+                                            symbol=alpaca_symbol,
+                                            qty=qty_final_sell,
+                                            side=OrderSide.SELL,
+                                            time_in_force=TimeInForce.DAY
+                                        )
+                                    else:
+                                        logger.info(f"Enviando LIMIT ORDER a Alpaca: SELL {qty_final_sell} {alpaca_symbol} @ {limit_price:.4f}")
+                                        order_data = LimitOrderRequest(
+                                            symbol=alpaca_symbol,
+                                            qty=qty_final_sell,
+                                            side=OrderSide.SELL,
+                                            time_in_force=TimeInForce.DAY,
+                                            limit_price=round(limit_price, 4)
+                                        )
+                                    
+                                    market_order = self.alpaca_client.submit_order(order_data=order_data)
+                                    logger.info(f"✅ Orden de Venta Confirmada. ID: {market_order.id}")
                             except Exception as e_alpaca:
-                                logger.error(f"❌ Error en la nube de Alpaca para {symbol}: {e_alpaca}")
+                                logger.error(f"❌ Error en Alpaca (Venta) para {symbol}: {e_alpaca}")
                         
                         executed_trades.append({
                             "timestamp": datetime.now(),
                             "symbol": symbol,
                             "action": "SELL",
-                            "price": price,
+                            "price": limit_price,
                             "quantity": total_qty_to_sell,
-                            "status": "REAL (Alpaca)" if (self.live_trading and not is_forex) else "SIMULADO"
+                            "status": "REAL" if (self.live_trading and not is_forex) else "SIMULADO"
                         })
+                        
+                        cost_basis = avg_entry * total_qty_to_sell
+                        pnl_pct = pnl / cost_basis if cost_basis > 0 else 0
+                        dt_in = datetime.fromisoformat(pos_list[0].entry_date)
+                        hold_time = (datetime.now() - dt_in).total_seconds() / 3600.0
+                        
+                        self.telegram.send_sell_alert(
+                            symbol=symbol,
+                            entry_price=avg_entry,
+                            exit_price=limit_price,
+                            qty=total_qty_to_sell,
+                            pnl=pnl,
+                            pnl_pct=pnl_pct,
+                            hold_time=hold_time,
+                            reason=reason,
+                            atr=atr,
+                            spread=spread_pct,
+                            is_real=(self.live_trading and not is_forex)
+                        )
             
             except Exception as e:
                 logger.error(f"Error interno ejecutando trade en {symbol}: {e}")
@@ -596,6 +714,10 @@ def mode_live():
 
     # Reporte
     bot.print_report()
+    
+    # Evaluar operaciones cerradas en el pasado
+    logger.info("🕒 Actualizando evaluación Post-Mortem de operaciones pasadas...")
+    bot.post_mortem.update_logs()
 
     # Enviar resumen completo por Telegram
     from config import AI_CONFIG, RISK_CONFIG, SIGNAL_CONFIG, BROKERS_CONFIG, ASSETS
@@ -617,8 +739,35 @@ def mode_live():
         capital=bot.risk_manager.current_capital,
         config_details=config_details,
         evaluations=bot.evaluations_log,
+        validations=getattr(bot, 'validation_log', []),
         portfolio_summary=getattr(bot, 'portfolio_summary_str', "")
     )
+    
+    # Enviar reporte semanal Post-Mortem de forma automática los viernes después de las 6PM
+    now = datetime.now()
+    if now.weekday() == 4 and now.hour >= 18:
+        logger.info("📅 Viernes por la tarde: Enviando reporte estadístico semanal Post-Mortem...")
+        report_text = bot.post_mortem.generate_weekly_report()
+        bot.telegram.send_post_mortem_report(report_text)
+
+
+def mode_report():
+    """Fuerza la generación y envío del reporte Post-Mortem estadístico."""
+    print("\n" + "="*70)
+    print("📋 MODO REPORTE - ESTADISTICAS POST-MORTEM")
+    print("="*70)
+    
+    bot = TradingBot()
+    logger.info("🕒 Actualizando métricas con precios actuales...")
+    bot.post_mortem.update_logs()
+    
+    logger.info("Generando reporte...")
+    report_text = bot.post_mortem.generate_weekly_report()
+    print("\n" + report_text)
+    
+    logger.info("Enviando a Telegram...")
+    bot.telegram.send_post_mortem_report(report_text)
+    logger.info("✅ Enviado.")
 
 
 def mode_backtest():
@@ -716,12 +865,13 @@ Ejemplos:
   python main_improved.py --mode live
   python main_improved.py --mode backtest
   python main_improved.py --mode analyze --symbol BTC-USD
+  python main_improved.py --mode report
         """
     )
     
     parser.add_argument(
         "--mode",
-        choices=["live", "backtest", "analyze"],
+        choices=["live", "backtest", "analyze", "report"],
         default="live",
         help="Modo de ejecución"
     )
@@ -737,6 +887,8 @@ Ejemplos:
     try:
         if args.mode == "live":
             mode_live()
+        elif args.mode == "report":
+            mode_report()
         elif args.mode == "backtest":
             mode_backtest()
         elif args.mode == "analyze":
