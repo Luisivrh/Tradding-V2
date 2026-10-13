@@ -50,6 +50,7 @@ import pandas_datareader as pdr
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.data.enums import DataFeed
 
 # ==========================================
 # DATA FETCHER CON CACHE
@@ -200,7 +201,8 @@ class DataFetcher:
                     symbol_or_symbols=symbol,
                     timeframe=TimeFrame.Day,
                     start=start_dt,
-                    end=end_dt
+                    end=end_dt,
+                    feed=DataFeed.IEX
                 )
                 
                 bars = self.alpaca_client.get_stock_bars(request_params)
@@ -311,7 +313,8 @@ class DataFetcher:
                     symbol_or_symbols=symbols_to_fetch,
                     timeframe=TimeFrame.Day,
                     start=start_dt,
-                    end=end_dt
+                    end=end_dt,
+                    feed=DataFeed.IEX
                 )
                 
                 bars = self.alpaca_client.get_stock_bars(request_params)
