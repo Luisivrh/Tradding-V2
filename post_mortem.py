@@ -1,6 +1,7 @@
 import json
 import logging
 from datetime import datetime
+import pandas as pd
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -8,8 +9,77 @@ logger = logging.getLogger(__name__)
 class PostMortemAnalyzer:
     def __init__(self, data_fetcher=None):
         self.audit_file = Path("audit_log.json")
+        self.speculative_tracker_file = Path("speculative_tracker.json")
         self.data_fetcher = data_fetcher
+        
+        # Ensure tracker exists
+        if not self.speculative_tracker_file.exists():
+            with open(self.speculative_tracker_file, 'w', encoding='utf-8') as f:
+                json.dump([], f)
     
+    def log_speculative_signal(self, ticker: str, price: float, score: float, spread: float):
+        """Registra un BUY especulativo en modo calibración para seguimiento (Ghost Trade)."""
+        try:
+            with open(self.speculative_tracker_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Avoid duplicate logs for the same ticker on the same day
+            today = datetime.now().strftime("%Y-%m-%d")
+            for entry in data:
+                if entry["ticker"] == ticker and entry["date"][:10] == today:
+                    return
+                    
+            data.append({
+                "ticker": ticker,
+                "date": datetime.now().isoformat(),
+                "price_signal": price,
+                "score_final": score,
+                "spread": spread,
+                "plus_1d": None,
+                "plus_3d": None,
+                "plus_5d": None
+            })
+            
+            with open(self.speculative_tracker_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            logger.error(f"Error registrando speculative signal en tracker: {e}")
+
+    def update_speculative_signals(self):
+        """Actualiza precios a 1, 3 y 5 días para los Ghost Trades."""
+        try:
+            with open(self.speculative_tracker_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                
+            updated = False
+            for entry in data:
+                if entry["plus_1d"] is not None and entry["plus_3d"] is not None and entry["plus_5d"] is not None:
+                    continue
+                    
+                date_signal = datetime.fromisoformat(entry["date"])
+                days_passed = (datetime.now() - date_signal).days
+                
+                if days_passed >= 1 and self.data_fetcher:
+                    df = self.data_fetcher.fetch_market_data(entry["ticker"], period="1mo")
+                    if not df.empty:
+                        future_data = df[df.index > pd.to_datetime(date_signal.date())]
+                        if not future_data.empty:
+                            if days_passed >= 1 and entry["plus_1d"] is None and len(future_data) >= 1:
+                                entry["plus_1d"] = float(future_data.iloc[0]['Close'])
+                                updated = True
+                            if days_passed >= 3 and entry["plus_3d"] is None and len(future_data) >= 3:
+                                entry["plus_3d"] = float(future_data.iloc[2]['Close'])
+                                updated = True
+                            if days_passed >= 5 and entry["plus_5d"] is None and len(future_data) >= 5:
+                                entry["plus_5d"] = float(future_data.iloc[4]['Close'])
+                                updated = True
+            
+            if updated:
+                with open(self.speculative_tracker_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4)
+        except Exception as e:
+            logger.error(f"Error actualizando speculative tracker: {e}")
+
     def _get_current_price(self, symbol):
         """Intenta obtener el precio actual para la evaluación retroactiva."""
         try:

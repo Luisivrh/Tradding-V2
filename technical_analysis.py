@@ -147,11 +147,14 @@ class TechnicalAnalyzer:
 class SignalAnalyzer:
     """Analiza señales y genera score de compra/venta."""
     
-    def __init__(self, df: pd.DataFrame, symbol: str):
+    def __init__(self, df: pd.DataFrame, symbol: str, asset_type: str = "normal", source: str = "unknown"):
         self.df = df.copy()
         self.symbol = symbol
+        self.asset_type = asset_type
+        self.source = source
         self.latest = self.df.iloc[-1]
         self.score = {}
+        self.is_speculative = self.asset_type in ["warrant", "penny"] or "speculative" in self.source
         
         # Calcular todos los indicadores
         self._calculate_all_indicators()
@@ -291,14 +294,56 @@ class SignalAnalyzer:
             return 1  # Tendencia moderada
         else:
             return 0  # Tendencia débil
-    
-    def calculate_signal_score(self) -> float:
-        """
-        Calcula score total de la señal en escala absoluta (0-10).
-        10.0 = Extremadamente Alcista (BUY)
-        5.0  = Neutral
-        0.0  = Extremadamente Bajista (SELL)
-        """
+
+    def _calculate_speculative_score(self) -> float:
+        """Motor V2 para Warrants y Penny Stocks explosivos."""
+        from config import SPECULATIVE_CONFIG
+        score_base = 0
+        
+        volume = self.latest["Volume"]
+        volume_sma = self.latest["Volume_SMA"]
+        volume_ratio = volume / volume_sma if volume_sma > 0 else 0
+        price = self.latest["Close"]
+        sma20 = self.latest["SMA_20"]
+        rsi = self.latest["RSI"]
+        macd, macd_signal = self.latest["MACD"], self.latest["MACD_Signal"]
+
+        min_abs_vol = SPECULATIVE_CONFIG.get("min_absolute_volume", 500000)
+        min_vol_ratio = SPECULATIVE_CONFIG.get("min_volume_ratio", 2.5)
+
+        # Filtro letal de microestructura para especulación
+        if volume < min_abs_vol or price < SPECULATIVE_CONFIG.get("min_price", 0.10):
+            self.score = {"type": "speculative", "reason": "Low absolute volume or price", "total": 0}
+            return 0.0
+
+        # 1. Relative Volume (Crítico para especulación) - Hasta 4 puntos
+        if volume_ratio > min_vol_ratio:
+            score_base += 4
+        elif volume_ratio > 1.5:
+            score_base += 2
+        
+        # 2. Breakout Reciente (Precio > SMA20) - Hasta 2 puntos
+        if price > sma20:
+            score_base += 2
+            
+        # 3. Momentum Corto Plazo (MACD) - Hasta 2 puntos
+        if macd > macd_signal:
+            score_base += 2
+            
+        # 4. RSI (Evitar comprar el tope absoluto) - Hasta 2 puntos
+        if 40 < rsi < 80: # Amplio rango para momentum, pero penaliza > 80 (parabólico tardío)
+            score_base += 2
+            
+        self.score = {
+            "type": "speculative",
+            "volume_ratio": volume_ratio,
+            "total": score_base
+        }
+        
+        return float(score_base)
+
+    def _calculate_institutional_score(self) -> float:
+        """Lógica institucional madura (SMA200, MACD, etc.)."""
         trend_score = self._score_trend()
         momentum_score = self._score_momentum()
         support_score = self._score_support_resistance()
@@ -318,6 +363,7 @@ class SignalAnalyzer:
         ) / total_weight * 10
         
         self.score = {
+            "type": "institutional",
             "total": final_score,
             "trend": trend_score,
             "momentum": momentum_score,
@@ -325,8 +371,16 @@ class SignalAnalyzer:
             "volume": volume_score,
             "multi_timeframe": multi_tf_score,
         }
-        
-        return final_score
+        return float(final_score)
+    
+    def calculate_signal_score(self) -> float:
+        """
+        Calcula score total de la señal en escala absoluta (0-10) usando el motor adecuado.
+        """
+        if self.is_speculative:
+            return self._calculate_speculative_score()
+        else:
+            return self._calculate_institutional_score()
     
     def evaluate_signal(self) -> Tuple[Optional[str], float, dict]:
         """
@@ -343,6 +397,8 @@ class SignalAnalyzer:
             "adx": self.latest["ADX"],
             "atr": self.latest.get("ATR", 0.0),
             "volume_ratio": self.latest["Volume"] / self.latest["Volume_SMA"] if self.latest["Volume_SMA"] > 0 else 0,
+            "source": self.source,
+            "asset_type": self.asset_type
         }
         
         # Calcular el score ponderado real en escala absoluta (0 a 10)
@@ -350,27 +406,36 @@ class SignalAnalyzer:
         
         details.update(self.score)
         
-        from config import SIGNAL_CONFIG
+        from config import SIGNAL_CONFIG, SPECULATIVE_CONFIG
         buy_threshold = SIGNAL_CONFIG.get("buy_threshold", 6.5)
-        # Umbral simétrico de venta (Si comprar es >= 7.0, vender es <= 3.0)
         sell_threshold = 10.0 - SIGNAL_CONFIG.get("sell_threshold", 6.5) 
         
+        action = None
         if absolute_score >= buy_threshold:
-            return "BUY", absolute_score, details
+            action = "BUY"
+        elif absolute_score <= sell_threshold and not self.is_speculative:
+            # En modo especulativo, vender por score bajo es peligroso si no hay tendencia
+            action = "SELL"
             
-        if absolute_score <= sell_threshold:
-            return "SELL", absolute_score, details
-            
-        return None, absolute_score, details
+        # Si está en modo calibración especulativa, marcamos el flag para que main.py intercepte y documente
+        if action == "BUY" and self.is_speculative and SPECULATIVE_CONFIG.get("calibration_mode", False):
+            logger.info(f"[CALIBRACION ESPECULATIVA] {self.symbol} superó el umbral ({absolute_score:.1f}). Señal marcada para tracking virtual.")
+            details["is_calibration"] = True
+        else:
+            details["is_calibration"] = False
+
+        return action, absolute_score, details
     
     def print_analysis(self):
         """Imprime análisis detallado sin emojis."""
+        engine_name = "ESPECULATIVO" if self.is_speculative else "INSTITUCIONAL"
         print(f"\n{'='*60}")
-        print(f"ANALISIS TECNICO: {self.symbol}")
+        print(f"ANALISIS TECNICO [{engine_name}]: {self.symbol} (Source: {self.source})")
         print(f"{'='*60}")
         print(f"Precio: {self.latest['Close']:.2f}")
         print(f"SMA20:  {self.latest['SMA_20']:.2f} | SMA50:  {self.latest['SMA_50']:.2f} | SMA200: {self.latest['SMA_200']:.2f}")
         print(f"RSI:    {self.latest['RSI']:.2f} | ADX: {self.latest['ADX']:.2f}")
         print(f"MACD:   {self.latest['MACD']:.4f} | Signal: {self.latest['MACD_Signal']:.4f}")
         print(f"Volume: {self.latest['Volume']:.0f} (SMA: {self.latest['Volume_SMA']:.0f})")
+        print(f"Score Total: {self.score.get('total', 0):.2f}/10.0")
         print(f"{'='*60}\n")

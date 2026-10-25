@@ -31,8 +31,27 @@ ASSETS = {
 # ==========================================
 SCREENER_CONFIG = {
     "enabled": True,
-    "max_dynamic_stocks": 30, # Máximo de acciones nuevas a agregar por escaneo
-    "sources": ["alpaca", "yahoo"], # Orden de prioridad
+    "max_dynamic_stocks": 80, # Ampliado para soportar múltiples universos (Screener V2)
+    # Asignación de cuotas por universo (Screener V2)
+    "allocation": {
+        "speculative": 15,    # Universo A: Movers, Gainers, Active
+        "institutional": 40,  # Universo B: Momentum Real / Relative Strength
+        "highs": 15,          # Universo C: 52 Week Highs
+        "watchlist": 10       # Universo D: Lista fija institucional
+    },
+    "watchlist": [
+        "CRGY", "FANG", "EOG", "OVV", "APA", "MTDR", 
+        "NVDA", "META", "AMZN", "MSFT", "GOOGL", "AR"
+    ]
+}
+
+# Parámetros para el motor especulativo (Screener V2)
+SPECULATIVE_CONFIG = {
+    "min_volume_ratio": 2.5,         # Volumen relativo mínimo vs SMA
+    "min_absolute_volume": 500000,   # Volumen absoluto mínimo (500k acciones) para evitar manipulación
+    "min_price": 0.10,               # Evitar basura extrema
+    "ignore_sma200": True,           # Permitir operar breakouts sin tendencia larga madura
+    "calibration_mode": True,        # Si True, registra pero es más permisivo para observar scores reales
 }
 
 # ==========================================
@@ -136,7 +155,7 @@ RISK_CONFIG = {
     "forex_starting_capital": 10000,
     "risk_per_trade": 0.01,         # Riesgamos 1% del capital base por trade (Risk Parity)
     "max_positions_per_type": {
-        "stocks": 15,
+        "stocks": 20,
         "crypto": 5,
         "forex": 5
     },

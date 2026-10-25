@@ -96,6 +96,13 @@ class TradingBot:
         self.evaluations_log = []
         self.post_mortem = PostMortemAnalyzer(self.data_fetcher)
         
+        self.daily_stats = {
+            "inst_analyzed": 0, "inst_score_7": 0, "inst_buys": 0,
+            "spec_analyzed": 0, "spec_score_7": 0, "spec_buys": 0,
+            "rej_spread": 0, "rej_volume": 0, "rej_atr": 0, "rej_liquidity": 0,
+            "top_scores": []
+        }
+        
         # Configurar clientes de Brokers si está habilitado el Live Trading
         self.live_trading = BROKERS_CONFIG["live_trading_enabled"]
         self.alpaca_client = None
@@ -155,9 +162,14 @@ class TradingBot:
         try:
             from screener import DynamicScreener
             screener = DynamicScreener()
+            dynamic_sources = {} # Guardar el origen de cada ticker dinámico
             if screener.enabled:
-                new_tickers = screener.get_dynamic_tickers()
-                for ticker in new_tickers:
+                new_tickers_data = screener.get_dynamic_tickers()
+                for t_data in new_tickers_data:
+                    ticker = t_data["symbol"]
+                    source = t_data["source"]
+                    dynamic_sources[ticker] = source
+                    
                     # Lo metemos al grupo "stocks" si no existe ya
                     if ticker not in dynamic_assets.get("stocks", []):
                         dynamic_assets.setdefault("stocks", []).append(ticker)
@@ -165,6 +177,7 @@ class TradingBot:
             logger.warning("Módulo screener no encontrado o dependencias faltantes. Continuando con lista estática.")
         except Exception as e:
             logger.error(f"Error ejecutando Screener: {e}")
+            dynamic_sources = {}
         # ----------------------------------------------
 
         for asset_group, symbols in dynamic_assets.items():
@@ -195,7 +208,12 @@ class TradingBot:
                         continue
                     
                     try:
-                        analyzer = SignalAnalyzer(df, symbol)
+                        # Determinar source y tipo real (ej. penny vs warrant)
+                        source = dynamic_sources.get(symbol, "static_config")
+                        price = df.iloc[-1]['Close']
+                        asset_type = self.risk_manager.categorize_asset(symbol, price) # Reusando logica de risk_manager
+                        
+                        analyzer = SignalAnalyzer(df, symbol, asset_type=asset_type, source=source)
                         signal_type, tech_score, details = analyzer.evaluate_signal()
                         details["tech_score_raw"] = tech_score
                         details["signal_type_raw"] = signal_type
@@ -318,6 +336,29 @@ class TradingBot:
                 elif final_score <= (10 - SIGNAL_CONFIG.get("sell_threshold", 6.5)):
                     final_signal = "SELL"
                 
+                # --- ACTUALIZAR ESTADÍSTICAS DIARIAS ---
+                is_spec = details.get("asset_type") in ["warrant", "penny"] or "speculative" in details.get("source", "")
+                cat = "spec" if is_spec else "inst"
+                
+                self.daily_stats[f"{cat}_analyzed"] += 1
+                if final_score >= 7.0:
+                    self.daily_stats[f"{cat}_score_7"] += 1
+                if final_signal == "BUY":
+                    self.daily_stats[f"{cat}_buys"] += 1
+                    
+                if details.get("reason") == "Low absolute volume or price":
+                    self.daily_stats["rej_volume"] += 1
+                    
+                self.daily_stats["top_scores"].append({
+                    "ticker": symbol,
+                    "source": details.get("source", "unknown"),
+                    "type": details.get("asset_type", "normal"),
+                    "tech": tech_score,
+                    "ai": ai_score,
+                    "final": final_score
+                })
+                # ---------------------------------------
+
                 if final_signal:
                     opportunity = {
                         "timestamp": datetime.now(),
@@ -470,9 +511,21 @@ class TradingBot:
                 execution_price = opp["current_price"]
                 
             atr = details.get("atr", execution_price * 0.05)
+            asset_type = details.get("asset_type", "normal")
             
             try:
                 if signal_type == "BUY":
+                    rules = MICROSTRUCTURE_CONFIG.get(asset_type, MICROSTRUCTURE_CONFIG["normal"])
+                    if spread_pct > rules["max_spread_pct"]:
+                        self.daily_stats["rej_spread"] += 1
+                        logger.warning(f"Rechazado por spread excesivo: {symbol} ({spread_pct*100:.2f}%)")
+                        continue
+                        
+                    if details.get("is_calibration"):
+                        self.post_mortem.log_speculative_signal(symbol, execution_price, score, spread_pct)
+                        logger.info(f"👻 SIGNAL GHOST TRACKED: {symbol} @ {execution_price:.4f} (Score: {score:.2f})")
+                        continue
+                        
                     position = self.risk_manager.open_position(
                         symbol=symbol,
                         price=execution_price,
@@ -484,6 +537,7 @@ class TradingBot:
                     )
                     
                     if not position:
+                        self.daily_stats["rej_liquidity"] += 1 # O pirámide
                         continue 
                         
                     qty_to_buy = position.quantity
@@ -664,26 +718,62 @@ class TradingBot:
         return executed_trades
     
     def print_report(self):
-        """Imprime reporte completo."""
+        """Imprime reporte completo y detallado."""
         print("\n" + "="*70)
         print(f"📈 REPORTE DE EJECUCION - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*70)
         
         print(f"\n✨ Estrategia: {STRATEGY_NAME} v{STRATEGY_VERSION}")
         
+        # Resumen Plain Text Específico
+        print("\nUNIVERSO INSTITUCIONAL")
+        print(f"- Analizados: {self.daily_stats['inst_analyzed']}")
+        print(f"- Score > 7: {self.daily_stats['inst_score_7']}")
+        print(f"- Señales BUY: {self.daily_stats['inst_buys']}")
+        
+        print("\nUNIVERSO ESPECULATIVO")
+        print(f"- Analizados: {self.daily_stats['spec_analyzed']}")
+        print(f"- Score > 7: {self.daily_stats['spec_score_7']}")
+        print(f"- Señales BUY: {self.daily_stats['spec_buys']}")
+        
+        print("\nRECHAZADOS POR RIESGO")
+        print(f"- Spread: {self.daily_stats['rej_spread']}")
+        print(f"- Volumen: {self.daily_stats['rej_volume']}")
+        print(f"- ATR: {self.daily_stats['rej_atr']}")
+        print(f"- Liquidez/Portfolio: {self.daily_stats['rej_liquidity']}")
+        
+        print("\nTOP 10 SCORES DEL DÍA")
+        print(f"{'Ticker':<8} | {'Source':<15} | {'Type':<8} | {'Tech':<6} | {'AI':<4} | {'Final':<6}")
+        print("-" * 65)
+        top10 = sorted(self.daily_stats['top_scores'], key=lambda x: x['final'], reverse=True)[:10]
+        for s in top10:
+            print(f"{s['ticker']:<8} | {s['source']:<15} | {s['type']:<8} | {s['tech']:<6.1f} | {s['ai']:<4.1f} | {s['final']:<6.2f}")
+            
+        try:
+            with open(self.post_mortem.speculative_tracker_file, 'r', encoding='utf-8') as f:
+                ghost_data = json.load(f)
+                if ghost_data:
+                    print("\nSEGUIMIENTO DE SEÑALES ESPECULATIVAS (GHOST TRADES)")
+                    print(f"{'Ticker':<8} | {'Date':<10} | {'Price':<8} | {'Score':<6} | {'Spread':<8} | {'+1D':<8} | {'+3D':<8} | {'+5D':<8}")
+                    print("-" * 85)
+                    for g in ghost_data[-20:]: # Muestra últimos 20
+                        p1 = f"${g['plus_1d']:.2f}" if g['plus_1d'] is not None else "Pending"
+                        p3 = f"${g['plus_3d']:.2f}" if g['plus_3d'] is not None else "Pending"
+                        p5 = f"${g['plus_5d']:.2f}" if g['plus_5d'] is not None else "Pending"
+                        date_str = g['date'][:10]
+                        print(f"{g['ticker']:<8} | {date_str:<10} | ${g['price_signal']:<7.2f} | {g['score_final']:<6.1f} | {g['spread']*100:>5.1f}%   | {p1:<8} | {p3:<8} | {p5:<8}")
+        except Exception:
+            pass
+
         if self.signals_detected:
-            print(f"\n🔍 Señales Detectadas: {len(self.signals_detected)}")
-            for sig in self.signals_detected:
-                print(f"   • {sig['symbol']:8} - {sig['signal_type']:4} (Score: {sig['score']:.2f}/10)")
-        else:
-            print("\n🔍 Señales Detectadas: 0")
+            print(f"\n🔍 Total Señales Detectadas: {len(self.signals_detected)}")
         
         if self.trades_executed:
-            print(f"\n✅ Trades Ejecutados: {len(self.trades_executed)}")
+            print(f"\n✅ Trades Ejecutados en Broker: {len(self.trades_executed)}")
             for trade in self.trades_executed:
                 print(f"   • {trade['symbol']:8} - {trade['action']:4} @ ${trade['price']:.2f}")
         else:
-            print("\n✅ Trades Ejecutados: 0")
+            print("\n✅ Trades Ejecutados en Broker: 0")
         
         # Resumen portfolio
         portfolio_str = self.risk_manager.print_summary()
