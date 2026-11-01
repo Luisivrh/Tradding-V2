@@ -415,7 +415,8 @@ class RiskManager:
             
         total_pnl = 0.0
         total_revenue = 0.0
-        is_forex = MICROSTRUCTURE_CONFIG.get(self.positions[symbol][0].asset_type) == "forex"
+        # MICROSTRUCTURE_CONFIG values are rule dicts, not category names.
+        is_forex = self.positions[symbol][0].asset_type == "forex"
         
         audit_entries = []
         

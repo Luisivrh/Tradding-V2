@@ -6,6 +6,28 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
+def _scalar_float(value):
+    """Convierte un valor de pandas/JSON a float escalar, o None si no es usable."""
+    if value is None:
+        return None
+    if isinstance(value, pd.DataFrame):
+        if value.empty:
+            return None
+        value = value.iloc[-1, 0]
+    if isinstance(value, pd.Series):
+        if value.empty:
+            return None
+        value = value.iloc[0]
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if result != result:  # NaN
+        return None
+    return result
+
+
 class PostMortemAnalyzer:
     def __init__(self, data_fetcher=None):
         self.audit_file = Path("audit_log.json")
@@ -65,14 +87,20 @@ class PostMortemAnalyzer:
                         future_data = df[df.index > pd.to_datetime(date_signal.date())]
                         if not future_data.empty:
                             if days_passed >= 1 and entry["plus_1d"] is None and len(future_data) >= 1:
-                                entry["plus_1d"] = float(future_data.iloc[0]['Close'])
-                                updated = True
+                                close_1d = _scalar_float(future_data.iloc[0]['Close'])
+                                if close_1d is not None:
+                                    entry["plus_1d"] = close_1d
+                                    updated = True
                             if days_passed >= 3 and entry["plus_3d"] is None and len(future_data) >= 3:
-                                entry["plus_3d"] = float(future_data.iloc[2]['Close'])
-                                updated = True
+                                close_3d = _scalar_float(future_data.iloc[2]['Close'])
+                                if close_3d is not None:
+                                    entry["plus_3d"] = close_3d
+                                    updated = True
                             if days_passed >= 5 and entry["plus_5d"] is None and len(future_data) >= 5:
-                                entry["plus_5d"] = float(future_data.iloc[4]['Close'])
-                                updated = True
+                                close_5d = _scalar_float(future_data.iloc[4]['Close'])
+                                if close_5d is not None:
+                                    entry["plus_5d"] = close_5d
+                                    updated = True
             
             if updated:
                 with open(self.speculative_tracker_file, 'w', encoding='utf-8') as f:
@@ -83,10 +111,14 @@ class PostMortemAnalyzer:
     def _get_current_price(self, symbol):
         """Intenta obtener el precio actual para la evaluación retroactiva."""
         try:
+            if not symbol:
+                return None
             import yfinance as yf
             df = yf.download(symbol.replace("-", "-"), period="1d", progress=False)
             if not df.empty:
-                return float(df['Close'].iloc[-1])
+                close = df['Close']
+                last_close = close.iloc[-1] if not isinstance(close, pd.DataFrame) else close.iloc[-1, 0]
+                return _scalar_float(last_close)
         except Exception as e:
             logger.debug(f"PostMortem no pudo obtener precio para {symbol}: {e}")
         return None
@@ -109,8 +141,11 @@ class PostMortemAnalyzer:
         for trade in logs:
             if 'exit_date' not in trade:
                 continue
-                
-            exit_date = datetime.fromisoformat(trade['exit_date'])
+            try:
+                exit_date = datetime.fromisoformat(trade['exit_date'])
+            except (TypeError, ValueError):
+                logger.warning("Post-Mortem omite trade con exit_date inválida: %s", trade.get('symbol'))
+                continue
             days_passed = (now - exit_date).total_seconds() / 86400.0
             
             milestones = [(1, '1d'), (3, '3d'), (5, '5d'), (10, '10d')]
@@ -122,7 +157,15 @@ class PostMortemAnalyzer:
                     needs_update = True
             
             if needs_update:
-                current_price = self._get_current_price(trade['symbol'])
+                current_price = self._get_current_price(trade.get('symbol'))
+                exit_price = _scalar_float(trade.get('exit_price'))
+                if not exit_price or exit_price <= 0:
+                    logger.warning(
+                        "Post-Mortem omite %s: exit_price inválido (%s)",
+                        trade.get('symbol'),
+                        trade.get('exit_price'),
+                    )
+                    continue
                 if current_price and current_price > 0:
                     for days, label in milestones:
                         price_key = f"price_after_{label}"
@@ -131,7 +174,7 @@ class PostMortemAnalyzer:
                         if days_passed >= days and trade.get(price_key) is None:
                             trade[price_key] = current_price
                             # Si es compra y vendimos, la oportunidad perdida es (Precio Actual - Precio Venta) / Precio Venta
-                            trade[profit_key] = (current_price - trade['exit_price']) / trade['exit_price']
+                            trade[profit_key] = (current_price - exit_price) / exit_price
                             updated = True
                             
                     # Update Exit Quality Score

@@ -33,7 +33,8 @@ if sys.stderr.encoding.lower() != 'utf-8':
 
 from config import (
     ASSETS, LOGGING_CONFIG, STRATEGY_NAME, STRATEGY_VERSION,
-    RISK_CONFIG, SIGNAL_CONFIG, BROKERS_CONFIG, print_config
+    RISK_CONFIG, SIGNAL_CONFIG, BROKERS_CONFIG, MICROSTRUCTURE_CONFIG,
+    print_config
 )
 from data_fetcher import DataFetcher, DataPreprocessor
 from technical_analysis import SignalAnalyzer
