@@ -51,7 +51,9 @@ SPECULATIVE_CONFIG = {
     "min_absolute_volume": 500000,   # Volumen absoluto mínimo (500k acciones) para evitar manipulación
     "min_price": 0.10,               # Evitar basura extrema
     "ignore_sma200": True,           # Permitir operar breakouts sin tendencia larga madura
-    "calibration_mode": True,        # Si True, registra pero es más permisivo para observar scores reales
+    "calibration_mode": False,       # False para ejecutar compras reales en el broker
+    "buy_threshold": 8.0,            # Exigir score alto (>= 8.0) para asegurar impulso explosivo
+    "max_hold_days": 2,              # Salida rápida: máximo 2 días si no despega
 }
 
 # ==========================================
@@ -96,8 +98,8 @@ INDICATORS = {
 # ==========================================
 SIGNAL_CONFIG = {
     # Umbral minimo de puntuacion para generar alerta
-    "buy_threshold": 7,      # 0-10
-    "sell_threshold": 7,     # 0-10
+    "buy_threshold": 6.8,    # 0-10 (calibrado para breakouts y tendencias institucionales)
+    "sell_threshold": 7.0,   # 0-10
     
     # Pesos para cada indicador (suma = 10)
     "weights": {
@@ -115,34 +117,44 @@ SIGNAL_CONFIG = {
 MICROSTRUCTURE_CONFIG = {
     # Definición de riesgo, spread máximo y multiplicadores ATR por categoría
     "warrant": {
-        "max_pos_pct": 0.02,        # Máximo 2% del capital en 1 warrant
+        "max_pos_pct": 0.02,        # Máximo 2% del capital en 1 warrant (~$970)
         "max_spread_pct": 0.15,     # Rechazar si el spread Bid/Ask > 15%
         "atr_sl_mult": 3.5,         # Stop Loss inicial a 3.5x ATR
-        "atr_ts_mult": 3.0          # Trailing Stop a 3.0x ATR
+        "atr_ts_mult": 3.0,         # Trailing Stop a 3.0x ATR
+        "take_profit_pct": 0.20,    # Take Profit fijo al +20%
+        "max_hold_days": 2          # Salida rápida: máx 2 días si no despega
     },
     "penny": {
-        "max_pos_pct": 0.03,        # Máximo 3% del capital en 1 penny stock
+        "max_pos_pct": 0.03,        # Máximo 3% del capital en 1 penny stock (~$1,450)
         "max_spread_pct": 0.08,     # Rechazar si el spread > 8%
         "atr_sl_mult": 2.5,
-        "atr_ts_mult": 2.0
+        "atr_ts_mult": 2.0,
+        "take_profit_pct": 0.20,    # Take Profit fijo al +20%
+        "max_hold_days": 3          # Salida rápida: máx 3 días para evitar dump
     },
     "normal": {
-        "max_pos_pct": 0.05,        # Máximo 5% del capital
+        "max_pos_pct": 0.08,        # Máximo 8% del capital (~$3,880) para dar liquidez a acciones líderes
         "max_spread_pct": 0.02,     # Rechazar si el spread > 2%
         "atr_sl_mult": 2.0,
-        "atr_ts_mult": 1.5
+        "atr_ts_mult": 1.5,
+        "take_profit_pct": 0.20,    # Take profit objetivo +20%
+        "max_hold_days": 30         # Dejar correr la tendencia institucional
     },
     "crypto": {
         "max_pos_pct": 0.05,
         "max_spread_pct": 0.03,
         "atr_sl_mult": 2.5,
-        "atr_ts_mult": 2.0
+        "atr_ts_mult": 2.0,
+        "take_profit_pct": 0.20,
+        "max_hold_days": 14
     },
     "forex": {
         "max_pos_pct": 0.05,
         "max_spread_pct": 0.01,
         "atr_sl_mult": 1.5,
-        "atr_ts_mult": 1.0
+        "atr_ts_mult": 1.0,
+        "take_profit_pct": 0.05,
+        "max_hold_days": 14
     }
 }
 
@@ -181,7 +193,7 @@ AI_CONFIG = {
     "model": "gemini-3.5-flash-lite",
     "use_for_validation": True,    # Validar señales con IA
     "use_for_news": True,           # Analizar noticias
-    "sentiment_impact": 0.3,        # Impacto del sentimiento (0.0-1.0)
+    "sentiment_impact": 0.15,       # Impacto del sentimiento (15%) para no hundir señales técnicas con 5.0 neutral
 }
 # ==========================================
 # NOTICIAS Y MACRO

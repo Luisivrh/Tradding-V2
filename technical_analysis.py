@@ -256,15 +256,22 @@ class SignalAnalyzer:
         bb_upper = self.latest["BB_Upper"]
         bb_lower = self.latest["BB_Lower"]
         bb_middle = self.latest["BB_Middle"]
+        rsi = self.latest.get("RSI", 50)
         
-        # Precio cercano a bandas
+        # Rebote en soporte o zona baja
         if price <= bb_lower * 1.02:
-            score += 1  # Soporte (posible compra)
-        if price >= bb_upper * 0.98:
-            score -= 0.5  # Resistencia (posible venta)
+            score += 1.0  # Soporte (posible compra por rebote)
+        elif price >= bb_upper * 0.98:
+            # Solo penalizar si hay sobrecompra extrema (RSI > 75)
+            if rsi > 75:
+                score -= 0.5
+            else:
+                score += 0.5  # Breakout con impulso sano
         
-        # Precio cerca del medio
-        if abs(price - bb_middle) / bb_middle < 0.05:
+        # Precio sobre el medio (zona compradora institucional)
+        if price > bb_middle:
+            score += 0.5
+        elif abs(price - bb_middle) / bb_middle < 0.05:
             score += 0.5
         
         return min(max(score, 0), 2)  # Max 2 puntos
@@ -407,14 +414,17 @@ class SignalAnalyzer:
         details.update(self.score)
         
         from config import SIGNAL_CONFIG, SPECULATIVE_CONFIG
-        buy_threshold = SIGNAL_CONFIG.get("buy_threshold", 6.5)
-        sell_threshold = 10.0 - SIGNAL_CONFIG.get("sell_threshold", 6.5) 
+        buy_threshold = SIGNAL_CONFIG.get("buy_threshold", 6.8)
+        sell_threshold = 10.0 - SIGNAL_CONFIG.get("sell_threshold", 7.0) 
         
+        # Para activos especulativos exigimos buy_threshold más alto (8.0 por defecto) para filtrar momentum explosivo real
+        min_buy_threshold = SPECULATIVE_CONFIG.get("buy_threshold", 8.0) if self.is_speculative else buy_threshold
+
         action = None
-        if absolute_score >= buy_threshold:
+        if absolute_score >= min_buy_threshold:
             action = "BUY"
         elif absolute_score <= sell_threshold and not self.is_speculative:
-            # En modo especulativo, vender por score bajo es peligroso si no hay tendencia
+            # En modo especulativo, nunca vender por oscilación de score bajo; las salidas las gestiona SL/TP/Trailing/MaxHold
             action = "SELL"
             
         # Si está en modo calibración especulativa, marcamos el flag para que main.py intercepte y documente

@@ -331,14 +331,18 @@ class TradingBot:
                 self._log_analysis(symbol, group_analyzers[symbol].latest, final_score, details)
                 
                 # Determinar si el score final supera los umbrales
+                is_spec = details.get("asset_type") in ["warrant", "penny"] or "speculative" in details.get("source", "")
+                from config import SPECULATIVE_CONFIG
+                min_buy_threshold = SPECULATIVE_CONFIG.get("buy_threshold", 8.0) if is_spec else SIGNAL_CONFIG.get("buy_threshold", 6.8)
+
                 final_signal = None
-                if final_score >= SIGNAL_CONFIG.get("buy_threshold", 6.5):
+                if final_score >= min_buy_threshold:
                     final_signal = "BUY"
-                elif final_score <= (10 - SIGNAL_CONFIG.get("sell_threshold", 6.5)):
+                elif final_score <= (10 - SIGNAL_CONFIG.get("sell_threshold", 7.0)) and not is_spec:
+                    # En modo especulativo, nunca vender por score bajo; las salidas las gestiona SL/TP/Trailing/MaxHold
                     final_signal = "SELL"
                 
                 # --- ACTUALIZAR ESTADÍSTICAS DIARIAS ---
-                is_spec = details.get("asset_type") in ["warrant", "penny"] or "speculative" in details.get("source", "")
                 cat = "spec" if is_spec else "inst"
                 
                 self.daily_stats[f"{cat}_analyzed"] += 1
@@ -425,17 +429,25 @@ class TradingBot:
                 continue
             
             # 2. Validación de umbrales para señales orgánicas
+            is_spec = opp.get("details", {}).get("asset_type") in ["warrant", "penny"] or "speculative" in opp.get("details", {}).get("source", "")
+            from config import SPECULATIVE_CONFIG
+            min_buy = SPECULATIVE_CONFIG.get("buy_threshold", 8.0) if is_spec else SIGNAL_CONFIG.get("buy_threshold", 6.8)
+
             if opp["signal_type"] == "BUY":
-                if opp["score"] < SIGNAL_CONFIG["buy_threshold"]:
+                if opp["score"] < min_buy:
                     is_valid = False
-                    reasons.append(f"Score insuficiente ({opp['score']:.2f} < {SIGNAL_CONFIG['buy_threshold']:.2f})")
+                    reasons.append(f"Score insuficiente ({opp['score']:.2f} < {min_buy:.2f})")
             else: # SELL orgánico
                 # Solo vender si ya tenemos el activo
                 if opp["symbol"] not in self.risk_manager.positions:
                     is_valid = False
                     reasons.append(f"No hay posición abierta para vender")
+                elif is_spec:
+                    # En especulativas no permitimos venta técnica prematura
+                    is_valid = False
+                    reasons.append("Venta técnica desactivada para especulativas (gestión por SL/TP/Trailing/MaxHold)")
                 else:
-                    sell_thresh = 10.0 - SIGNAL_CONFIG.get("sell_threshold", 6.5)
+                    sell_thresh = 10.0 - SIGNAL_CONFIG.get("sell_threshold", 7.0)
                     if opp["score"] > sell_thresh:
                         is_valid = False
                         reasons.append(f"Score insuficiente para venta bajista ({opp['score']:.2f} > {sell_thresh:.2f})")
@@ -490,10 +502,14 @@ class TradingBot:
     def execute_trades(self, validated_opportunities: List[Dict]) -> List[Dict]:
         """
         Ejecuta trades basado en oportunidades validadas usando Órdenes Limitadas.
+        Prioriza por Score de mayor a menor para asignar capital a las mejores señales.
         """
         logger.info("📊 Ejecutando trades...\n")
         
         executed_trades = []
+        
+        # Priorizar oportunidades por mayor score
+        validated_opportunities = sorted(validated_opportunities, key=lambda x: x.get("score", 0), reverse=True)
         
         for opp in validated_opportunities:
             symbol = opp["symbol"]
@@ -657,30 +673,38 @@ class TradingBot:
                                 except Exception as e_cancel:
                                     logger.warning(f"Error evaluando órdenes previas para {alpaca_symbol}: {e_cancel}")
                                 
-                                # 2. Enviar la nueva orden de venta (Solo si no decidimos conservar la vieja)
+                                # 2. Enviar la orden de venta (Solo si no decidimos conservar la vieja)
                                 if not skip_new_order:
-                                    # Si es un Stop Loss de emergencia en un Warrant, a veces es mejor Limit al Bid.
-                                    # Por seguridad para asegurar salida de emergencia usamos Market si es STOP, sino Limit.
-                                    if "STOP" in reason:
-                                        logger.info(f"Enviando MARKET ORDER a Alpaca (Emergencia): SELL {qty_final_sell} {alpaca_symbol}")
-                                        order_data = MarketOrderRequest(
-                                            symbol=alpaca_symbol,
-                                            qty=qty_final_sell,
-                                            side=OrderSide.SELL,
-                                            time_in_force=TimeInForce.DAY
-                                        )
+                                    # Si la posición a liquidar es fraccional (< 1.0) o es cierre definitivo (STOP/TP/TIMEOUT),
+                                    # usamos el método nativo close_position de Alpaca para liquidar el 100% sin dejar residuos (dust)
+                                    if total_qty_to_sell < 1.0 or "STOP" in reason or "TAKE_PROFIT" in reason or "MAX_TIME" in reason:
+                                        logger.info(f"Liquidando posición completa en Alpaca (Zero-Dust) para {alpaca_symbol}...")
+                                        try:
+                                            market_order = self.alpaca_client.close_position(alpaca_symbol)
+                                            logger.info(f"✅ Posición cerrada en Alpaca (Zero-Dust): {alpaca_symbol}")
+                                        except Exception as e_close:
+                                            logger.warning(f"Aviso al liquidar posición directa en Alpaca: {e_close}")
                                     else:
-                                        logger.info(f"Enviando LIMIT ORDER a Alpaca: SELL {qty_final_sell} {alpaca_symbol} @ {limit_price:.4f}")
-                                        order_data = LimitOrderRequest(
-                                            symbol=alpaca_symbol,
-                                            qty=qty_final_sell,
-                                            side=OrderSide.SELL,
-                                            time_in_force=TimeInForce.DAY,
-                                            limit_price=round(limit_price, 4)
-                                        )
-                                    
-                                    market_order = self.alpaca_client.submit_order(order_data=order_data)
-                                    logger.info(f"✅ Orden de Venta Confirmada. ID: {market_order.id}")
+                                        if "STOP" in reason:
+                                            logger.info(f"Enviando MARKET ORDER a Alpaca (Emergencia): SELL {qty_final_sell} {alpaca_symbol}")
+                                            order_data = MarketOrderRequest(
+                                                symbol=alpaca_symbol,
+                                                qty=qty_final_sell,
+                                                side=OrderSide.SELL,
+                                                time_in_force=TimeInForce.DAY
+                                            )
+                                        else:
+                                            logger.info(f"Enviando LIMIT ORDER a Alpaca: SELL {qty_final_sell} {alpaca_symbol} @ {limit_price:.4f}")
+                                            order_data = LimitOrderRequest(
+                                                symbol=alpaca_symbol,
+                                                qty=qty_final_sell,
+                                                side=OrderSide.SELL,
+                                                time_in_force=TimeInForce.DAY,
+                                                limit_price=round(limit_price, 4)
+                                            )
+
+                                        market_order = self.alpaca_client.submit_order(order_data=order_data)
+                                        logger.info(f"✅ Orden de Venta Confirmada. ID: {market_order.id}")
                             except Exception as e_alpaca:
                                 logger.error(f"❌ Error en Alpaca (Venta) para {symbol}: {e_alpaca}")
                         

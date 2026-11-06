@@ -174,9 +174,10 @@ class RiskManager:
                     # Asumimos un ATR del 5% del precio si no tenemos histórico
                     fallback_atr = avg_price * 0.05 
                     sl_dist = fallback_atr * rules["atr_sl_mult"]
+                    tp_pct = rules.get("take_profit_pct", RISK_CONFIG["take_profit_pct"])
                     
                     stop_loss = avg_price - sl_dist if side_str == "BUY" else avg_price + sl_dist
-                    take_profit = avg_price * (1 + RISK_CONFIG["take_profit_pct"]) if side_str == "BUY" else avg_price * (1 - RISK_CONFIG["take_profit_pct"])
+                    take_profit = avg_price * (1 + tp_pct) if side_str == "BUY" else avg_price * (1 - tp_pct)
                     
                     self.positions[symbol] = [Position(
                         symbol=symbol,
@@ -279,6 +280,13 @@ class RiskManager:
             
         if symbol in self.positions and len(self.positions[symbol]) > 0:
             pos_list = self.positions[symbol]
+            # Si la posición acumulada es solo residuo (dust) menor a $100 o menos de 1 acción normal, permitir nueva compra
+            total_shares = sum(p.quantity for p in pos_list)
+            total_val = sum(p.quantity * price for p in pos_list)
+            if asset_type == "normal" and (total_shares < 1.0 or total_val < 100.0):
+                logger.info(f"[{symbol}] Posición residual detectada ({total_shares:.4f} shares / ${total_val:.2f}). Se permite compra completa.")
+                return True
+
             if len(pos_list) >= self.max_pyramid: return False
             today = str(datetime.now().date())
             if today == pos_list[-1].entry_date[:10]: return False
@@ -303,14 +311,15 @@ class RiskManager:
         quantity = self._calculate_position_size(price, safe_atr, asset_type, is_forex)
         if quantity <= 0: return None
         
-        # Calcular stops usando ATR
+        # Calcular stops usando ATR y take profit configurado por categoría
         stop_dist = safe_atr * rules["atr_sl_mult"]
+        tp_pct = rules.get("take_profit_pct", RISK_CONFIG["take_profit_pct"])
         if side == "BUY":
             stop_loss = price - stop_dist
-            take_profit = price * (1 + RISK_CONFIG["take_profit_pct"])
+            take_profit = price * (1 + tp_pct)
         else: # SELL
             stop_loss = price + stop_dist
-            take_profit = price * (1 - RISK_CONFIG["take_profit_pct"])
+            take_profit = price * (1 - tp_pct)
             
         cost = quantity * price
         
@@ -389,11 +398,12 @@ class RiskManager:
                 elif pos.side == "BUY" and current_price >= pos.take_profit:
                     sell_reasons.append(f"TAKE_PROFIT (Meta ${pos.take_profit:.2f})")
                     
-                # 4. Timeout
+                # 4. Timeout diferenciado por microestructura del activo
                 else:
                     days_held = (datetime.now() - datetime.fromisoformat(pos.entry_date)).days
-                    if days_held >= RISK_CONFIG.get("max_hold_days", 30):
-                        sell_reasons.append(f"MAX_TIME ({days_held} días)")
+                    max_hold = rules.get("max_hold_days", RISK_CONFIG.get("max_hold_days", 30))
+                    if days_held >= max_hold:
+                        sell_reasons.append(f"MAX_TIME ({days_held}d >= {max_hold}d {pos.asset_type.upper()})")
 
             if sell_reasons:
                 reason = " | ".join(set(sell_reasons))
