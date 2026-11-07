@@ -37,11 +37,12 @@ SCREENER_CONFIG = {
         "speculative": 15,    # Universo A: Movers, Gainers, Active
         "institutional": 40,  # Universo B: Momentum Real / Relative Strength
         "highs": 15,          # Universo C: 52 Week Highs
-        "watchlist": 10       # Universo D: Lista fija institucional
+        "watchlist": 20       # Universo D: Lista fija institucional / Mid-Caps investigadas
     },
     "watchlist": [
         "CRGY", "FANG", "EOG", "OVV", "APA", "MTDR", 
-        "NVDA", "META", "AMZN", "MSFT", "GOOGL", "AR"
+        "NVDA", "META", "AMZN", "MSFT", "GOOGL", "AR",
+        "BRZE", "GMAB", "ADT", "KPLT", "BMBL", "GDYN"
     ]
 }
 
