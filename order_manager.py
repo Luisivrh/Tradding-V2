@@ -18,6 +18,9 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+KIND_TRADE = "TRADE"
+KIND_PROTECTIVE_STOP = "PROTECTIVE_STOP"
+
 
 class OrderManager:
     """Administra el ciclo de vida asíncrono de órdenes pendientes contra Alpaca."""
@@ -57,9 +60,15 @@ class OrderManager:
         qty: float,
         limit_price: float,
         asset_type: str = "normal",
-        details: Optional[Dict] = None
+        details: Optional[Dict] = None,
+        kind: str = KIND_TRADE,
+        stop_price: float = 0.0
     ):
-        """Registra una nueva orden pendiente de confirmación."""
+        """
+        Registra una nueva orden pendiente de confirmación.
+        kind=KIND_TRADE: orden de entrada/salida del bot.
+        kind=KIND_PROTECTIVE_STOP: stop loss que vive en Alpaca (GTC) protegiendo la posición.
+        """
         self.pending_orders[order_id] = {
             "order_id": order_id,
             "client_order_id": client_order_id,
@@ -67,21 +76,42 @@ class OrderManager:
             "side": side.upper(),
             "qty": float(qty),
             "limit_price": float(limit_price),
+            "stop_price": float(stop_price),
+            "kind": kind,
             "asset_type": asset_type,
             "details": details or {},
             "created_at": datetime.now().isoformat(),
             "partially_filled_qty": 0.0
         }
         self.save_state()
-        logger.info(f"📋 Orden {order_id} ({side} {qty} {symbol} @ ${limit_price:.4f}) registrada en pendientes.")
+        price_txt = f"stop ${stop_price:.4f}" if kind == KIND_PROTECTIVE_STOP else f"@ ${limit_price:.4f}"
+        logger.info(f"📋 Orden {order_id} ({kind} {side} {qty} {symbol} {price_txt}) registrada en pendientes.")
 
-    def has_pending_order(self, symbol: str, side: Optional[str] = None) -> bool:
-        """Verifica si ya existe una orden activa para este símbolo."""
+    def remove_order(self, order_id: str):
+        """Deja de dar seguimiento a una orden (ej. reemplazada o cancelada por el bot)."""
+        if order_id in self.pending_orders:
+            del self.pending_orders[order_id]
+            self.save_state()
+
+    def has_pending_order(self, symbol: str, side: Optional[str] = None, include_protective: bool = False) -> bool:
+        """
+        Verifica si ya existe una orden activa del bot para este símbolo.
+        Los stops de protección se ignoran por defecto: no deben bloquear una venta del bot
+        (el bot los cancela antes de vender).
+        """
         for o in self.pending_orders.values():
-            if o.get("symbol") == symbol:
-                if side is None or o.get("side") == side.upper():
-                    return True
+            if o.get("symbol") != symbol:
+                continue
+            if not include_protective and o.get("kind") == KIND_PROTECTIVE_STOP:
+                continue
+            if side is None or o.get("side") == side.upper():
+                return True
         return False
+
+    def get_protective_orders(self, symbol: str) -> List[Dict]:
+        """Devuelve los stops de protección registrados para un símbolo."""
+        return [o for o in self.pending_orders.values()
+                if o.get("symbol") == symbol and o.get("kind") == KIND_PROTECTIVE_STOP]
 
     def get_pending_speculative_cost(self) -> float:
         """Calcula el costo total comprometido en órdenes de compra especulativas pendientes."""

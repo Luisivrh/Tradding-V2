@@ -429,10 +429,13 @@ class RiskManager:
         logger.info(f"✅ POSICION ABIERTA ({asset_type.upper()}): {side} {quantity:.4f} {symbol} @ {price:.2f} | SL: {stop_loss:.2f} | Spread: {spread_pct*100:.2f}%")
         return position
 
-    def check_exit_conditions(self, current_prices: Dict[str, Dict]) -> List[Dict]:
+    def check_exit_conditions(self, current_prices: Dict[str, Dict], update_trailing: bool = True) -> List[Dict]:
         """
         current_prices: { 'AAPL': {'price': 150.0, 'atr': 3.5, 'spread': 0.001}, ... }
         Revisa posiciones abiertas contra precios y ajusta Chandelier Trailing Stop (ATR).
+
+        update_trailing=False (monitor intradía): solo evalúa SL/TP/timeout sin mover el trailing,
+        para que el trailing se calcule con la vela diaria igual que en el backtest.
         """
         forced_exits = []
         
@@ -453,8 +456,8 @@ class RiskManager:
                 
                 rules = MICROSTRUCTURE_CONFIG.get(pos.asset_type, MICROSTRUCTURE_CONFIG["normal"])
                 
-                # 1. Trailing Stop Adaptativo (ATR)
-                if current_price > pos.highest_price and pos.side == "BUY":
+                # 1. Trailing Stop Adaptativo (ATR) - solo en el escaneo diario
+                if update_trailing and current_price > pos.highest_price and pos.side == "BUY":
                     pos.highest_price = current_price
                     if RISK_CONFIG.get("trailing_stop_enabled", True):
                         safe_atr = current_atr if current_atr > 0 else pos.atr_at_entry

@@ -191,6 +191,24 @@ RISK_CONFIG = {
 }
 
 # ==========================================
+# HORARIOS (MODO AUTO) Y STOPS EN EL BROKER
+# ==========================================
+# El cron corre `python main.py --mode auto` cada 15 minutos y el código decide qué hacer:
+# - Escaneo completo de acciones 1 vez al día cerca del cierre (vela diaria casi completa = igual que el backtest).
+# - Escaneo de cripto/forex 1 vez al día después del cierre de la vela diaria UTC.
+# - En las demás corridas: solo monitor de salidas (SL/TP/timeout) y actualización de stops en Alpaca.
+SCHEDULE_CONFIG = {
+    "timezone": "America/New_York",
+    "stocks_scan_time": "15:40",          # Hora NY del escaneo diario de acciones
+    "min_minutes_before_close": 5,        # No escanear si faltan menos minutos para el cierre
+    "daily_24h_scan_time_utc": "00:05",   # Escaneo diario de cripto y forex (hora UTC)
+    "state_file": "scheduler_state.json",
+    # Stops de protección en Alpaca (opción A)
+    "protective_stops_enabled": True,
+    "stop_replace_min_pct": 0.002,        # Reemplazar el stop solo si sube al menos 0.2%
+}
+
+# ==========================================
 # INTEGRACION CON IA (GEMINI)
 # ==========================================
 AI_CONFIG = {

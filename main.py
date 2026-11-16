@@ -20,13 +20,14 @@ import argparse
 import sys
 import math
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional, Set
 import json
 import codecs
 import pandas as pd
 
 from pricing_utils import round_order_price, resolve_exit_price
 from order_manager import OrderManager
+from protective_stops import ProtectiveStopManager, is_stock_symbol
 
 # Forzar salida en consola a UTF-8 para evitar errores con emojis en Windows
 if sys.stdout.encoding.lower() != 'utf-8':
@@ -103,6 +104,7 @@ class TradingBot:
         self.evaluations_log = []
         self.post_mortem = PostMortemAnalyzer(self.data_fetcher)
         self.order_manager = OrderManager()
+        self.stop_manager = None  # Stops de protección en Alpaca (solo en live real)
         
         self.daily_stats = {
             "inst_analyzed": 0, "inst_score_7": 0, "inst_buys": 0,
@@ -139,14 +141,20 @@ class TradingBot:
 
                     # 2. Sincronizar portafolio interno con broker
                     self.risk_manager.sync_with_broker(self.alpaca_client)
+
+                    # 3. Gestor de stops de protección en Alpaca (opción A)
+                    self.stop_manager = ProtectiveStopManager(
+                        self.alpaca_client, self.order_manager, self.risk_manager, self.telegram
+                    )
             except Exception as e:
                 logger.error(f"Error conectando a Brokers: {e}")
                 self.live_trading = False
     
-    def scan_market(self) -> List[Dict]:
+    def scan_market(self, groups: Optional[Set[str]] = None) -> List[Dict]:
         """
         Escanea el mercado en busca de oportunidades.
         Analiza todos los activos configurados divididos por grupos (batch).
+        groups: subconjunto de grupos a escanear ({'stocks'}, {'crypto', 'forex'}...). None = todos.
         """
         logger.info("="*70)
         logger.info("🔍 INICIANDO ESCANEO DE MERCADO (POR LOTES + SCREENER)")
@@ -158,6 +166,8 @@ class TradingBot:
         # --- 1. INTEGRACIÓN DE SCREENER Y PORTFOLIO ---
         # Hacemos una copia de los activos configurados para poder inyectar dinámicamente
         dynamic_assets = {k: list(v) for k, v in ASSETS.items()}
+        if groups is not None:
+            dynamic_assets = {k: v for k, v in dynamic_assets.items() if k in groups}
         
         # A. Asegurar que las posiciones abiertas SIEMPRE se analicen (Regla de Oro)
         if hasattr(self.risk_manager, 'positions'):
@@ -165,6 +175,10 @@ class TradingBot:
                 # Agregar a "stocks" por defecto si no está en ningún grupo (o detectar cripto)
                 is_crypto = "-USD" in pos_symbol or "/" in pos_symbol
                 group_key = "crypto" if is_crypto else "stocks"
+                if pos_symbol in ASSETS.get("forex", []):
+                    continue  # Forex ya está en su propio grupo
+                if groups is not None and group_key not in groups:
+                    continue
                 if pos_symbol not in dynamic_assets.get(group_key, []):
                     if group_key not in dynamic_assets:
                         dynamic_assets[group_key] = []
@@ -176,7 +190,7 @@ class TradingBot:
             from screener import DynamicScreener
             screener = DynamicScreener()
             dynamic_sources = {} # Guardar el origen de cada ticker dinámico
-            if screener.enabled:
+            if screener.enabled and (groups is None or "stocks" in groups):
                 new_tickers_data = screener.get_dynamic_tickers()
                 for t_data in new_tickers_data:
                     ticker = t_data["symbol"]
@@ -549,6 +563,60 @@ class TradingBot:
             logger.warning(f"No se pudo obtener quote en vivo para {symbol}: {e}")
         return {"bid": 0, "ask": 0, "spread_pct": 0.0, "price": 0}
 
+    def get_market_clock(self):
+        """Reloj de Alpaca. En dry-run usa un cliente de solo lectura (no envía órdenes)."""
+        try:
+            client = self.alpaca_client
+            if client is None and BROKERS_CONFIG["alpaca"]["api_key"]:
+                from alpaca.trading.client import TradingClient
+                client = TradingClient(
+                    api_key=BROKERS_CONFIG["alpaca"]["api_key"],
+                    secret_key=BROKERS_CONFIG["alpaca"]["secret_key"],
+                    paper=BROKERS_CONFIG["alpaca"]["paper"]
+                )
+            return client.get_clock() if client else None
+        except Exception as e:
+            logger.warning(f"No se pudo consultar el reloj de Alpaca: {e}")
+            return None
+
+    def monitor_exits(self, include_stocks: bool, include_crypto: bool) -> List[Dict]:
+        """
+        Monitor ligero de salidas: revisa SL / TP / timeout de las posiciones abiertas con
+        cotizaciones en vivo. No corre screener, indicadores ni IA.
+        No mueve el trailing stop (se recalcula en el escaneo diario con la vela diaria,
+        igual que en el backtest).
+        """
+        prices = {}
+        for symbol, pos_list in self.risk_manager.positions.items():
+            if not pos_list or symbol in ASSETS.get("forex", []):
+                continue
+            stock = is_stock_symbol(symbol)
+            if (stock and not include_stocks) or (not stock and not include_crypto):
+                continue
+            quote = self._get_real_time_quote(symbol)
+            if quote["bid"] <= 0 or quote["ask"] <= 0:
+                continue
+            prices[symbol] = {
+                "price": (quote["bid"] + quote["ask"]) / 2.0,
+                "atr": 0.0,
+                "spread": quote["spread_pct"],
+                "asset_type": pos_list[0].asset_type,
+            }
+
+        if not prices:
+            logger.info("👁️ Monitor de salidas: sin posiciones con cotización disponible.")
+            return []
+
+        logger.info(f"👁️ Monitor de salidas: revisando {len(prices)} posición(es)...")
+        exits = self.risk_manager.check_exit_conditions(prices, update_trailing=False)
+        for exit_opp in exits:
+            exit_opp["details"]["asset_type"] = prices[exit_opp["symbol"]]["asset_type"]
+            logger.warning(f"🚨 SALIDA (MONITOR): {exit_opp['symbol']} -> {exit_opp['details']['reason']}")
+        if not exits:
+            return []
+        validated = self.validate_signals_with_context(exits)
+        return self.execute_trades(validated) if validated else []
+
     def execute_trades(self, validated_opportunities: List[Dict]) -> List[Dict]:
         """
         Ejecuta trades basado en oportunidades validadas usando Órdenes Limitadas.
@@ -775,7 +843,18 @@ class TradingBot:
                                 
                                 alpaca_symbol = symbol.replace("-USD", "/USD") if "-USD" in symbol else symbol
                                 client_order_id = f"TR2_SELL_{symbol.replace('/', '_').replace('-', '_')}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                                
+
+                                # [OPCIÓN A] Liberar las acciones apartadas por el stop de protección en Alpaca.
+                                # Si el stop ya se ejecutó, NO vender de nuevo: la reconciliación registra esa venta.
+                                if self.stop_manager:
+                                    stop_state = self.stop_manager.cancel_for_symbol(symbol)
+                                    if stop_state == "filled":
+                                        logger.warning(f"🛡️ [{symbol}] El stop de Alpaca ya vendió la posición. Se omite la venta del bot.")
+                                        continue
+                                    if stop_state == "unknown":
+                                        logger.warning(f"🛡️ [{symbol}] No se confirmó la cancelación del stop en Alpaca. Se reintenta en la siguiente corrida.")
+                                        continue
+
                                 # Evaluar órdenes abiertas previas
                                 skip_new_order = False
                                 try:
@@ -1035,67 +1114,124 @@ class TradingBot:
 # MODOS DE EJECUCION
 # ==========================================
 
+def run_full_cycle(bot: "TradingBot", groups: Optional[Set[str]], dry_run: bool, weekly_report: bool = False) -> List[Dict]:
+    """Escaneo completo (señales + validación + ejecución), reporte, post-mortem y resumen."""
+    opportunities = bot.scan_market(groups=groups)
+    validated = bot.validate_signals_with_context(opportunities)
+
+    executed = []
+    if validated:
+        executed = bot.execute_trades(validated)
+
+    bot.print_report()
+
+    # En dry-run, NUNCA tocar audit_log.json ni enviar resúmenes a Telegram
+    if dry_run:
+        logger.info("🧪 [DRY-RUN] Simulación en memoria finalizada: audit_log.json, portfolio.json y Telegram intactos.")
+        return executed
+
+    logger.info("🕒 Actualizando evaluación Post-Mortem de operaciones pasadas...")
+    bot.post_mortem.update_logs()
+
+    from config import AI_CONFIG
+    total_assets = sum(len(v) for v in ASSETS.values())
+    config_details = {
+        "ia_enabled": AI_CONFIG["enabled"],
+        "live_trading": BROKERS_CONFIG["live_trading_enabled"],
+        "buy_threshold": SIGNAL_CONFIG["buy_threshold"],
+        "risk_pct": RISK_CONFIG["risk_per_trade"] * 100,
+        "tp_pct": RISK_CONFIG["take_profit_pct"] * 100,
+        "sl_pct": RISK_CONFIG["stop_loss_pct"] * 100,
+        "total_assets": total_assets
+    }
+    bot.telegram.send_summary(
+        detected=len(bot.signals_detected),
+        executed=len(executed),
+        capital=bot.risk_manager.current_capital,
+        config_details=config_details,
+        evaluations=bot.evaluations_log,
+        validations=bot.validation_log,
+        portfolio_summary=bot.risk_manager.print_summary()
+    )
+
+    if weekly_report:
+        logger.info("📅 Enviando reporte estadístico semanal Post-Mortem...")
+        bot.telegram.send_post_mortem_report(bot.post_mortem.generate_weekly_report())
+    return executed
+
+
+def _ensure_protective_stops(bot: "TradingBot", dry_run: bool):
+    """Coloca/actualiza los stops de protección en Alpaca al final de cada corrida."""
+    if dry_run or not bot.stop_manager:
+        return
+    try:
+        bot.stop_manager.ensure_all()
+    except Exception as e:
+        logger.error(f"Error asegurando stops de protección: {e}")
+
+
 def mode_live(dry_run: bool = False):
-    """Modo en vivo - escanea y ejecuta."""
+    """Modo en vivo manual: escanea TODOS los grupos y ejecuta (sin planificador)."""
     print("\n" + "="*70)
     print("🚀 MODO EN VIVO - BOT TRADING" + (" [🧪 DRY-RUN ACTIVO]" if dry_run else ""))
     print("="*70)
     print_config()
 
     bot = TradingBot(dry_run=dry_run)
+    now = datetime.now()
+    weekly = (not dry_run) and now.weekday() == 4 and now.hour >= 18
+    run_full_cycle(bot, groups=None, dry_run=dry_run, weekly_report=weekly)
+    _ensure_protective_stops(bot, dry_run)
 
-    # Escanear mercado
-    opportunities = bot.scan_market()
 
-    # Validar
-    validated = bot.validate_signals_with_context(opportunities)
+def mode_auto(dry_run: bool = False):
+    """
+    Modo planificado: el cron lo ejecuta cada 15 minutos y el código decide qué hacer
+    (ver scheduler.py): escaneo diario de acciones cerca del cierre, escaneo diario de
+    cripto/forex, monitor de salidas y actualización de stops en Alpaca.
+    """
+    from datetime import timezone
+    from scheduler import decide_tasks, load_state, save_state
 
-    # Ejecutar
-    executed = []
-    if validated:
-        executed = bot.execute_trades(validated)
+    bot = TradingBot(dry_run=dry_run)
+    clock = bot.get_market_clock()
+    market_open = bool(clock and clock.is_open)
+    next_close = getattr(clock, "next_close", None) if clock else None
+    if next_close is not None and next_close.tzinfo is None:
+        next_close = next_close.replace(tzinfo=timezone.utc)
 
-    # Reporte
-    bot.print_report()
-    
-    # [BLOQUEANTE 2 CORREGIDO] En dry-run, NUNCA tocar audit_log.json ni enviar resúmenes a Telegram
-    if not dry_run:
-        logger.info("🕒 Actualizando evaluación Post-Mortem de operaciones pasadas...")
-        bot.post_mortem.update_logs()
+    now_utc = datetime.now(timezone.utc)
+    state = load_state()
+    tasks = decide_tasks(now_utc, market_open, next_close, state)
+    logger.info(
+        f"🗓️ MODO AUTO{' [DRY-RUN]' if dry_run else ''} | Mercado acciones: {'ABIERTO' if market_open else 'CERRADO'} | "
+        f"Escaneo acciones: {tasks['stocks_scan']} | Escaneo cripto/forex: {tasks['daily_24h_scan']} | "
+        f"Monitor acciones: {tasks['monitor_stocks']} | Monitor cripto: {tasks['monitor_crypto']}"
+    )
 
-        # Enviar resumen completo por Telegram
-        from config import AI_CONFIG, RISK_CONFIG, SIGNAL_CONFIG, BROKERS_CONFIG, ASSETS
-        total_assets = sum(len(v) for v in ASSETS.values())
+    groups: Set[str] = set()
+    if tasks["stocks_scan"]:
+        groups.add("stocks")
+    if tasks["daily_24h_scan"]:
+        groups.add("crypto")
+        if tasks["include_forex"]:
+            groups.add("forex")
 
-        config_details = {
-            "ia_enabled": AI_CONFIG["enabled"],
-            "live_trading": BROKERS_CONFIG["live_trading_enabled"],
-            "buy_threshold": SIGNAL_CONFIG["buy_threshold"],
-            "risk_pct": RISK_CONFIG["risk_per_trade"] * 100,
-            "tp_pct": RISK_CONFIG["take_profit_pct"] * 100,
-            "sl_pct": RISK_CONFIG["stop_loss_pct"] * 100,
-            "total_assets": total_assets
-        }
+    if groups:
+        # Reporte semanal: en el escaneo de cripto del sábado 00:05 UTC (viernes por la tarde en NY)
+        weekly = tasks["daily_24h_scan"] and now_utc.weekday() == 5
+        run_full_cycle(bot, groups=groups, dry_run=dry_run, weekly_report=weekly and not dry_run)
+        if not dry_run:
+            if tasks["stocks_scan"]:
+                state["stocks_scan_date"] = tasks["today_ny"]
+            if tasks["daily_24h_scan"]:
+                state["daily_24h_scan_date"] = tasks["today_utc"]
+            save_state(state)
 
-        bot.telegram.send_summary(
-            detected=len(bot.signals_detected),
-            executed=len(executed),
-            capital=bot.risk_manager.current_capital,
-            config_details=config_details,
-            evaluations=bot.evaluations_log,
-            validations=bot.validation_log,
-            portfolio_summary=bot.risk_manager.print_summary()
-        )
-    else:
-        logger.info("🧪 [DRY-RUN] Simulación en memoria finalizada: audit_log.json, portfolio.json y Telegram intactos.")
-    
-    # Enviar reporte semanal Post-Mortem de forma automática los viernes después de las 6PM (solo en live real)
-    if not dry_run:
-        now = datetime.now()
-        if now.weekday() == 4 and now.hour >= 18:
-            logger.info("📅 Viernes por la tarde: Enviando reporte estadístico semanal Post-Mortem...")
-            report_text = bot.post_mortem.generate_weekly_report()
-            bot.telegram.send_post_mortem_report(report_text)
+    if tasks["monitor_stocks"] or tasks["monitor_crypto"]:
+        bot.monitor_exits(include_stocks=tasks["monitor_stocks"], include_crypto=tasks["monitor_crypto"])
+
+    _ensure_protective_stops(bot, dry_run)
 
 
 def mode_report():
@@ -1209,6 +1345,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos:
+  python main.py --mode auto            (cron cada 15 min: el bot decide qué hacer)
+  python main.py --mode auto --dry-run  (simula la decisión sin enviar órdenes ni escribir archivos)
   python main_improved.py --mode live
   python main_improved.py --mode backtest
   python main_improved.py --mode analyze --symbol BTC-USD
@@ -1218,7 +1356,7 @@ Ejemplos:
     
     parser.add_argument(
         "--mode",
-        choices=["live", "backtest", "analyze", "report"],
+        choices=["live", "auto", "backtest", "analyze", "report"],
         default="live",
         help="Modo de ejecución"
     )
@@ -1240,6 +1378,8 @@ Ejemplos:
     try:
         if args.mode == "live":
             mode_live(dry_run=args.dry_run)
+        elif args.mode == "auto":
+            mode_auto(dry_run=args.dry_run)
         elif args.mode == "report":
             mode_report()
         elif args.mode == "backtest":
