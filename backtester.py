@@ -1,319 +1,299 @@
 """
 ==============================================
-BACKTESTER - BOT TRADING
+BACKTESTER RECONSTRUIDO (TAREA 5.0) - TRADDING-V2
 ==============================================
-Simula la estrategia en datos históricos
-para validar su desempeño.
+Simulador cuantitativo en memoria para validación de estrategias:
+- RiskManager aislado en memoria (in_memory=True): NUNCA toca portfolio.json ni audit_log.json.
+- Paridad con los motores Institucional y Especulativo (asset_type configurable).
+- Costos de fricción realistas: Slippage y comisiones por orden.
+- Reúso exacto de check_exit_conditions (ATR stops, Trailing Chandelier, Take Profit).
+- Validación de significancia estadística (>= 100 trades) y split Out-of-Sample.
+- Documentación de sesgo de supervivencia.
 """
 
+import logging
 import pandas as pd
 import numpy as np
-import logging
 from datetime import datetime
-from typing import Dict, List, Tuple
-import matplotlib.pyplot as plt
+from typing import Dict, List, Tuple, Optional
 
-from config import BACKTEST_CONFIG, RISK_CONFIG
-from risk_management import RiskManager, Position
+from config import BACKTEST_CONFIG, RISK_CONFIG, ASSETS
+from risk_management import RiskManager
 from technical_analysis import SignalAnalyzer
 from data_fetcher import DataFetcher, DataPreprocessor
 
 logger = logging.getLogger(__name__)
 
-# ==========================================
-# BACKTESTER
-# ==========================================
 
 class Backtester:
-    """Ejecuta backtests de la estrategia."""
-    
-    def __init__(self, symbol: str, df: pd.DataFrame):
+    """Ejecuta backtests realistas en memoria para un activo."""
+
+    def __init__(
+        self,
+        symbol: str,
+        df: pd.DataFrame,
+        asset_type: str = "normal",
+        initial_capital: float = None,
+        commission: float = 1.0,
+        slippage_pct: float = 0.001
+    ):
         self.symbol = symbol
         self.df = df.copy()
-        self.risk_manager = RiskManager(BACKTEST_CONFIG["initial_capital"])
+        self.asset_type = asset_type
+        self.initial_capital = initial_capital or BACKTEST_CONFIG.get("initial_capital", 100000.0)
+        self.commission = commission
+        self.slippage_pct = slippage_pct
+        
+        # RiskManager aislado 100% en memoria
+        self.risk_manager = RiskManager(starting_capital=self.initial_capital, in_memory=True)
         self.trades_log = []
         self.equity_curve = []
         self.equity_dates = []
-    
+
     def run(self, verbose: bool = True) -> Dict:
-        """
-        Ejecuta el backtest.
+        """Ejecuta la simulación histórica bar-by-bar."""
+        logger.info(f"⏳ Iniciando backtest en memoria para {self.symbol} ({self.asset_type})...")
         
-        Returns:
-            dict: Resultados del backtest
-        """
-        logger.info(f"⏳ Iniciando backtest de {self.symbol}...")
+        if len(self.df) < 50:
+            logger.warning(f"Insuficientes velas ({len(self.df)}) para {self.symbol}")
+            return {}
+
+        # Determinar punto de inicio (mínimo 50 velas para indicadores técnicos)
+        start_idx = min(50, len(self.df) - 10)
         
-        # Iterar por cada vela
-        for idx in range(len(self.df)):
+        for idx in range(start_idx, len(self.df)):
             current_date = self.df.index[idx]
-            
-            # Solo procesar después de tener suficientes datos (200 días para SMA200)
-            if idx < 200:
-                continue
-            
-            # Obtener datos hasta este punto
+            current_price = float(self.df.iloc[idx]["Close"])
             df_slice = self.df.iloc[:idx+1]
             
-            # Analizar señal
-            analyzer = SignalAnalyzer(df_slice, self.symbol)
-            signal_type, score, details = analyzer.evaluate_signal()
-            
-            current_price = self.df.iloc[idx]['Close']
-            
-            # Procesar posiciones abiertas
-            for symbol in list(self.risk_manager.positions.keys()):
-                position = self.risk_manager.positions[symbol]
-                should_exit, exit_reason = position.should_exit(current_price)
-                
-                if should_exit:
-                    self.risk_manager.close_position(
-                        symbol,
-                        current_price,
-                        reason=exit_reason,
-                        exit_date=str(current_date)
+            # Estimación del ATR de la vela actual
+            high_low = float(self.df.iloc[idx]["High"]) - float(self.df.iloc[idx]["Low"])
+            current_atr = max(high_low, current_price * 0.02)
+            spread = self.slippage_pct
+
+            # 1. EVALUAR CONDICIONES DE SALIDA (STOP LOSS / TP / TRAILING STOP)
+            if self.symbol in self.risk_manager.positions:
+                current_prices_dict = {
+                    self.symbol: {
+                        "price": current_price,
+                        "atr": current_atr,
+                        "spread": spread
+                    }
+                }
+                forced_exits = self.risk_manager.check_exit_conditions(current_prices_dict)
+                for exit_opp in forced_exits:
+                    reason = exit_opp.get("details", {}).get("reason", "STOP_LOSS")
+                    exit_exec_price = current_price * (1.0 - self.slippage_pct)
+                    pnl = self.risk_manager.close_position(
+                        self.symbol,
+                        exit_exec_price,
+                        reason=reason,
+                        exit_date=str(current_date),
+                        exit_atr=current_atr,
+                        exit_spread=spread
                     )
+                    self.risk_manager.current_capital -= self.commission
                     self.trades_log.append({
                         "date": current_date,
                         "action": "EXIT",
-                        "symbol": symbol,
-                        "reason": exit_reason,
-                        "price": current_price
+                        "symbol": self.symbol,
+                        "reason": reason,
+                        "price": exit_exec_price,
+                        "pnl": pnl
                     })
-            
-            # Abrir nueva posición si hay señal
-            if signal_type == "BUY" and self.symbol not in self.risk_manager.positions:
-                if signal_type == "BUY" and score >= BACKTEST_CONFIG.get("min_score", 6.0):
-                    position = self.risk_manager.open_position(
-                        self.symbol,
-                        current_price,
+
+            # 2. EVALUAR SEÑALES TÉCNICAS (PARIDAD CON EL MOTOR DE PRODUCCIÓN)
+            analyzer = SignalAnalyzer(df_slice, self.symbol, asset_type=self.asset_type)
+            signal_type, score, details = analyzer.evaluate_signal()
+
+            # Venta técnica si hay señal SELL
+            if signal_type == "SELL" and self.symbol in self.risk_manager.positions:
+                exit_exec_price = current_price * (1.0 - self.slippage_pct)
+                pnl = self.risk_manager.close_position(
+                    self.symbol,
+                    exit_exec_price,
+                    reason="SEÑAL_TÉCNICA_SELL",
+                    exit_date=str(current_date),
+                    exit_atr=current_atr,
+                    exit_spread=spread,
+                    exit_score=score
+                )
+                self.risk_manager.current_capital -= self.commission
+                self.trades_log.append({
+                    "date": current_date,
+                    "action": "EXIT",
+                    "symbol": self.symbol,
+                    "reason": "SEÑAL_TÉCNICA_SELL",
+                    "price": exit_exec_price,
+                    "pnl": pnl
+                })
+
+            # Compra si hay señal BUY y no tenemos posición abierta
+            elif signal_type == "BUY" and self.symbol not in self.risk_manager.positions:
+                min_score = BACKTEST_CONFIG.get("min_score", 6.8)
+                if score >= min_score:
+                    buy_exec_price = current_price * (1.0 + self.slippage_pct)
+                    pos = self.risk_manager.open_position(
+                        symbol=self.symbol,
+                        price=buy_exec_price,
                         side="BUY",
+                        atr=current_atr,
+                        spread_pct=spread,
+                        score=score,
                         entry_date=str(current_date)
                     )
-                    
-                    if position:
+                    if pos:
+                        self.risk_manager.current_capital -= self.commission
                         self.trades_log.append({
                             "date": current_date,
                             "action": "ENTRY",
                             "symbol": self.symbol,
                             "signal_score": score,
-                            "price": current_price
+                            "price": buy_exec_price,
+                            "quantity": pos.quantity
                         })
-            
-            # Registrar equity
-            portfolio_value, pnl = self.risk_manager.get_portfolio_value(
-                {self.symbol: current_price}
-            )
-            self.equity_curve.append(portfolio_value)
+
+            # Registrar valor de portafolio
+            total_equity = self.risk_manager.get_total_portfolio_value(is_forex=(self.asset_type == "forex"))
+            self.equity_curve.append(total_equity)
             self.equity_dates.append(current_date)
-        
-        # Cerrar posiciones abiertas al final
-        final_price = self.df.iloc[-1]['Close']
-        for symbol in list(self.risk_manager.positions.keys()):
+
+        # Cerrar remanentes al final del período
+        if self.symbol in self.risk_manager.positions:
+            final_p = float(self.df.iloc[-1]["Close"])
             self.risk_manager.close_position(
-                symbol,
-                final_price,
+                self.symbol,
+                final_p,
                 reason="BACKTEST_END",
                 exit_date=str(self.df.index[-1])
             )
-        
-        results = self._generate_report()
-        
+
+        report = self._generate_report()
         if verbose:
-            self._print_report(results)
-        
-        return results
-    
+            self._print_report(report)
+        return report
+
     def _generate_report(self) -> Dict:
-        """Genera reporte de resultados."""
-        summary = self.risk_manager.get_summary()
+        """Calcula métricas clave de desempeño."""
+        trades = self.risk_manager.trade_history
+        total_trades = len(trades)
+        wins = [t for t in trades if t.get("pnl", 0) > 0]
+        losses = [t for t in trades if t.get("pnl", 0) < 0]
         
-        # Calcular métricas adicionales
-        equity_series = pd.Series(self.equity_curve)
+        gross_profit = sum(t["pnl"] for t in wins)
+        gross_loss = abs(sum(t["pnl"] for t in losses))
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (999.0 if gross_profit > 0 else 0.0)
+        win_rate = (len(wins) / total_trades * 100.0) if total_trades > 0 else 0.0
         
-        # Sharpe Ratio (simplificado)
-        returns = equity_series.pct_change()
-        sharpe_ratio = (returns.mean() / returns.std() * np.sqrt(252)) if returns.std() > 0 else 0
+        final_equity = self.equity_curve[-1] if self.equity_curve else self.initial_capital
+        total_return_pct = ((final_equity - self.initial_capital) / self.initial_capital) * 100.0
         
-        # Profit Factor
-        winning_total = sum(t["pnl"] for t in self.risk_manager.trade_history if t["pnl"] > 0)
-        losing_total = abs(sum(t["pnl"] for t in self.risk_manager.trade_history if t["pnl"] < 0))
-        profit_factor = winning_total / losing_total if losing_total > 0 else 0
-        
-        # Max drawdown
-        equity_series_min = equity_series.cummin()
-        drawdown_series = (equity_series - equity_series_min) / equity_series_min
-        max_drawdown = drawdown_series.max() if len(drawdown_series) > 0 else 0
-        
-        final_equity = self.equity_curve[-1] if self.equity_curve else BACKTEST_CONFIG["initial_capital"]
-        total_return = (final_equity - BACKTEST_CONFIG["initial_capital"]) / BACKTEST_CONFIG["initial_capital"] * 100
-        
+        # Max Drawdown
+        equity_series = pd.Series(self.equity_curve) if self.equity_curve else pd.Series([self.initial_capital])
+        cummax = equity_series.cummax()
+        dd_series = (equity_series - cummax) / cummax
+        max_dd = abs(float(dd_series.min())) if len(dd_series) > 0 else 0.0
+
         return {
             "symbol": self.symbol,
-            "total_trades": summary["total_trades"],
-            "winning_trades": summary["winning_trades"],
-            "losing_trades": summary["losing_trades"],
-            "win_rate": summary["win_rate"],
+            "asset_type": self.asset_type,
+            "total_trades": total_trades,
+            "winning_trades": len(wins),
+            "losing_trades": len(losses),
+            "win_rate": win_rate,
             "profit_factor": profit_factor,
-            "total_pnl": summary["total_pnl"],
-            "total_return": total_return,
-            "sharpe_ratio": sharpe_ratio,
-            "max_drawdown": max_drawdown,
-            "avg_win": summary["avg_win"],
-            "avg_loss": summary["avg_loss"],
-            "initial_capital": BACKTEST_CONFIG["initial_capital"],
-            "final_capital": final_equity,
-            "start_date": str(self.df.index[0]),
-            "end_date": str(self.df.index[-1]),
+            "total_pnl": sum(t.get("pnl", 0) for t in trades),
+            "total_return_pct": total_return_pct,
+            "max_drawdown_pct": max_dd * 100.0,
+            "initial_capital": self.initial_capital,
+            "final_equity": final_equity,
+            "is_statistically_significant": total_trades >= 100,
+            "survivorship_bias_note": "Aviso: Este activo se seleccionó a posteriori; los retornos reales de screening dinámico pueden diferir."
         }
-    
-    def _print_report(self, results: Dict):
-        """Imprime un reporte formateado."""
+
+    def _print_report(self, r: Dict):
+        """Imprime resumen formateado."""
+        if not r:
+            return
         print("\n" + "="*70)
-        print(f"📊 REPORTE DE BACKTEST: {results['symbol']}")
+        print(f"📊 REPORTE DE BACKTEST EN MEMORIA: {r['symbol']} ({r['asset_type'].upper()})")
         print("="*70)
-        print(f"Período:              {results['start_date']} → {results['end_date']}")
-        print(f"Capital Inicial:      ${results['initial_capital']:,.2f}")
-        print(f"Capital Final:        ${results['final_capital']:,.2f}")
-        print(f"P&L Total:            ${results['total_pnl']:,.2f}")
-        print(f"Retorno Total:        {results['total_return']:.2f}%")
+        print(f"Capital Inicial:      ${r['initial_capital']:,.2f}")
+        print(f"Capital Final:        ${r['final_equity']:,.2f}")
+        print(f"P&L Total:            ${r['total_pnl']:,.2f}")
+        print(f"Retorno Neto:         {r['total_return_pct']:+.2f}%")
+        print(f"Max Drawdown:         {r['max_drawdown_pct']:.2f}%")
         print("-"*70)
-        print(f"Total Trades:         {results['total_trades']}")
-        print(f"Trades Ganadores:     {results['winning_trades']}")
-        print(f"Trades Perdedores:    {results['losing_trades']}")
-        print(f"Win Rate:             {results['win_rate']:.1f}%")
-        print(f"Profit Factor:        {results['profit_factor']:.2f}x")
-        print("-"*70)
-        print(f"Avg. Ganancia:        ${results['avg_win']:,.2f}")
-        print(f"Avg. Pérdida:         ${results['avg_loss']:,.2f}")
-        print(f"Max Drawdown:         {results['max_drawdown']*100:.2f}%")
-        print(f"Sharpe Ratio:         {results['sharpe_ratio']:.2f}")
+        print(f"Total Operaciones:    {r['total_trades']} {'(Significativo >=100)' if r['is_statistically_significant'] else '(Muestra Pequeña <100)'}")
+        print(f"Win Rate:             {r['win_rate']:.1f}%")
+        print(f"Profit Factor:        {r['profit_factor']:.2f}x")
         print("="*70 + "\n")
-    
-    def plot_equity_curve(self, filename: str = "equity_curve.png"):
-        """Plotea la curva de equity."""
-        plt.figure(figsize=(14, 6))
-        
-        plt.plot(self.equity_dates, self.equity_curve, linewidth=2, label='Equity')
-        plt.fill_between(self.equity_dates, self.equity_curve, alpha=0.3)
-        
-        plt.xlabel('Fecha')
-        plt.ylabel('Valor del Portfolio ($)')
-        plt.title(f'Curva de Equity - Backtest {self.symbol}')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        
-        plt.savefig(filename, dpi=100)
-        logger.info(f"Gráfico guardado en: {filename}")
-        plt.close()
 
+    def run_train_test_split(self, train_pct: float = 0.7, verbose: bool = True) -> Dict[str, Dict]:
+        """
+        [FASE 5] Ejecuta validación cruzada In-Sample (70%) vs Out-of-Sample (30%)
+        para detectar sobreajuste (overfitting).
+        """
+        if len(self.df) < 100:
+            logger.warning(f"Insuficientes datos ({len(self.df)}) para split train/test en {self.symbol}.")
+            return {"in_sample": self.run(verbose=verbose), "out_of_sample": {}}
 
-# ==========================================
-# CORREDOR DE BACKTESTS
-# ==========================================
+        split_idx = int(len(self.df) * train_pct)
+        train_df = self.df.iloc[:split_idx]
+        test_df = self.df.iloc[split_idx:]
+
+        logger.info(f"📚 Ejecutando In-Sample (Train: {len(train_df)} barras)...")
+        bt_train = Backtester(self.symbol, train_df, self.asset_type, self.initial_capital, self.commission, self.slippage_pct)
+        report_train = bt_train.run(verbose=False)
+
+        logger.info(f"🧪 Ejecutando Out-of-Sample (Test: {len(test_df)} barras)...")
+        bt_test = Backtester(self.symbol, test_df, self.asset_type, self.initial_capital, self.commission, self.slippage_pct)
+        report_test = bt_test.run(verbose=False)
+
+        if verbose:
+            print("\n" + "="*70)
+            print(f"🔬 VALIDACIÓN IN-SAMPLE / OUT-OF-SAMPLE: {self.symbol} ({self.asset_type.upper()})")
+            print("="*70)
+            print(f"In-Sample (Train 70%):     WinRate: {report_train.get('win_rate', 0):.1f}% | ProfitFactor: {report_train.get('profit_factor', 0):.2f}x | Trades: {report_train.get('total_trades', 0)}")
+            print(f"Out-of-Sample (Test 30%):  WinRate: {report_test.get('win_rate', 0):.1f}% | ProfitFactor: {report_test.get('profit_factor', 0):.2f}x | Trades: {report_test.get('total_trades', 0)}")
+            print("="*70 + "\n")
+
+        return {"in_sample": report_train, "out_of_sample": report_test}
+
 
 class BacktestRunner:
-    """Ejecuta backtests para múltiples activos."""
-    
+    """Orquestador de backtests para múltiples activos con Out-of-Sample Split."""
+
     def __init__(self):
-        self.results = {}
         self.data_fetcher = DataFetcher()
-        self.preprocessor = DataPreprocessor()
-    
-    def run_backtest(self, symbol: str, df: pd.DataFrame) -> Dict:
-        """Ejecuta backtest para un símbolo."""
-        
-        # Validar datos
-        if not self.preprocessor.validate_data(df, symbol):
-            logger.error(f"Datos inválidos para {symbol}")
-            return None
-        
-        # Filtrar por fecha
-        start_date = pd.to_datetime(BACKTEST_CONFIG["start_date"])
-        end_date = pd.to_datetime(BACKTEST_CONFIG["end_date"])
-        
-        df_filtered = df[(df.index >= start_date) & (df.index <= end_date)]
-        
-        if len(df_filtered) < 200:
-            logger.error(f"Insuficientes datos para {symbol}")
-            return None
-        
-        # Ejecutar backtest
-        backtester = Backtester(symbol, df_filtered)
-        results = backtester.run()
-        
-        self.results[symbol] = results
-        
-        return results
-    
-    def run_all_backtests(self, symbols: List[str]) -> Dict[str, Dict]:
-        """Ejecuta backtests para todos los símbolos."""
-        
-        logger.info(f"🔄 Ejecutando backtests para {len(symbols)} símbolos...")
-        
-        # Descargar datos
-        fetcher = DataFetcher()
-        
-        for symbol in symbols:
-            logger.info(f"\n📈 Backtestando {symbol}...")
-            
-            df = fetcher.fetch_market_data(symbol)
-            
+        self.results = {}
+
+    def run_all_backtests(self, symbols: List[str], asset_type: str = "normal") -> Dict[str, Dict]:
+        """Ejecuta backtests para una lista de símbolos."""
+        logger.info(f"🔄 Ejecutando backtests en memoria para {len(symbols)} activos...")
+        for sym in symbols:
+            df = self.data_fetcher.fetch_market_data(sym)
             if not df.empty:
-                self.run_backtest(symbol, df)
-        
+                bt = Backtester(sym, df, asset_type=asset_type)
+                res = bt.run(verbose=True)
+                if res:
+                    self.results[sym] = res
         return self.results
-    
-    def print_summary(self):
-        """Imprime resumen de todos los backtests."""
-        if not self.results:
-            logger.warning("No hay resultados de backtest")
-            return
-        
-        print("\n" + "="*70)
-        print("📊 RESUMEN DE BACKTESTS")
-        print("="*70)
-        
-        for symbol, results in self.results.items():
-            if results:
-                print(f"\n{symbol:8} | "
-                      f"Return: {results['total_return']:>7.2f}% | "
-                      f"Win Rate: {results['win_rate']:>5.1f}% | "
-                      f"Trades: {results['total_trades']:>3} | "
-                      f"Sharpe: {results['sharpe_ratio']:>5.2f}")
-        
-        print("="*70 + "\n")
-    
-    def get_best_performer(self) -> Tuple[str, Dict]:
-        """Retorna el símbolo con mejor desempeño."""
-        if not self.results:
-            return None, None
-        
-        best_symbol = max(self.results.keys(), 
-                         key=lambda k: self.results[k]['total_return'] if self.results[k] else -999)
-        
-        return best_symbol, self.results[best_symbol]
 
-
-# ==========================================
-# EJEMPLO DE USO
-# ==========================================
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
+    logging.basicConfig(level=logging.INFO)
+    # Prueba rápida con datos sintéticos para validar que no toca disco
+    dates = pd.date_range("2025-01-01", periods=100, freq="D")
+    prices = np.linspace(100, 150, 100) + np.random.normal(0, 2, 100)
+    sample_df = pd.DataFrame({
+        "Open": prices,
+        "High": prices + 1.5,
+        "Low": prices - 1.5,
+        "Close": prices,
+        "Volume": 1000000
+    }, index=dates)
     
-    # Ejemplo: Backtestear BTC
-    runner = BacktestRunner()
-    
-    symbols_to_test = ["BTC-USD", "ETH-USD"]
-    results = runner.run_all_backtests(symbols_to_test)
-    
-    runner.print_summary()
-    
-    best_symbol, best_results = runner.get_best_performer()
-    if best_results:
-        print(f"\n🏆 Mejor desempeño: {best_symbol}")
+    bt = Backtester("TEST_STOCK", sample_df, asset_type="normal")
+    res = bt.run(verbose=True)
+    print("Backtest sintético completado sin errores y sin tocar archivos.")

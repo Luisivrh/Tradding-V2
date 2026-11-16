@@ -69,8 +69,31 @@ class TelegramNotifier:
         )
         self.send_message(msg)
 
-    def send_sell_alert(self, symbol: str, entry_price: float, exit_price: float, qty: float, pnl: float, pnl_pct: float, hold_time: float, reason: str, atr: float, spread: float, is_real: bool):
+    def send_sell_alert(
+        self,
+        symbol: str,
+        entry_price: float = 0.0,
+        exit_price: float = 0.0,
+        qty: float = 0.0,
+        pnl: float = 0.0,
+        pnl_pct: float = 0.0,
+        hold_time: float = 0.0,
+        reason: str = "VENTA",
+        atr: float = 0.0,
+        spread: float = 0.0,
+        is_real: bool = False,
+        **kwargs
+    ):
         """Formatea y envía una alerta de VENTA detallada."""
+        # Compatibilidad de nombres de parámetros alternativos
+        if "price" in kwargs and exit_price == 0.0:
+            exit_price = float(kwargs["price"])
+        if "holding_time" in kwargs and hold_time == 0.0:
+            try:
+                hold_time = float(str(kwargs["holding_time"]).replace("h", "").replace("hrs", "").strip())
+            except Exception:
+                hold_time = 0.0
+                
         tipo_ejecucion = "🔴 REAL/PAPER (Market/Limit)" if is_real else "🟡 SIMULACION INTERNA"
         hora = datetime.now().strftime('%H:%M:%S')
         

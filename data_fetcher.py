@@ -20,17 +20,14 @@ import time
 import random
 import ssl
 
-# --- PARCHE PARA ERROR DE CERTIFICADOS SSL ---
+# --- CONFIGURACIÓN DE CERTIFICADOS SSL SEGUROS ---
 try:
     import certifi
-    os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
-    os.environ['SSL_CERT_FILE'] = certifi.where()
+    os.environ.setdefault('REQUESTS_CA_BUNDLE', certifi.where())
+    os.environ.setdefault('SSL_CERT_FILE', certifi.where())
 except ImportError:
     pass
-
-# Opción 2: Deshabilitar la verificación globalmente (necesario si alpaca-py ignora env vars)
-ssl._create_default_https_context = ssl._create_unverified_context
-# ---------------------------------------------
+# -------------------------------------------------
 
 try:
     import ccxt
@@ -227,9 +224,14 @@ class DataFetcher:
                         logger.info(f"[OK] {symbol}: {len(df)} velas descargadas (Alpaca)")
                         return df
             except Exception as e:
-                logger.warning(f"Fallo Alpaca para {symbol}: {e}. Intentando yfinance...")
+                logger.warning(f"Fallo Alpaca para {symbol}: {e}.")
         
-        # Respaldo: yfinance (Usado siempre para Forex)
+        # [FASE 4] Respaldo de yfinance reservado exclusivamente para Forex (=X)
+        if not symbol.endswith("=X") and symbol not in ASSETS.get("forex", []):
+            logger.info(f"Omitiendo yfinance para acción {symbol} (exclusión intencional de OTC/no listadas en Alpaca).")
+            return pd.DataFrame()
+
+        # Respaldo: yfinance para Forex
         try:
             logger.info(f"Descargando datos de accion (yfinance fallback): {symbol}")
             
@@ -240,7 +242,6 @@ class DataFetcher:
             time.sleep(random.uniform(3.0, 5.0))
             
             session = requests.Session()
-            session.verify = False
             
             df = yf.download(yf_symbol, period=period_str, progress=False, session=session)
             

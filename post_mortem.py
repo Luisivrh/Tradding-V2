@@ -109,16 +109,54 @@ class PostMortemAnalyzer:
             logger.error(f"Error actualizando speculative tracker: {e}")
 
     def _get_current_price(self, symbol):
-        """Intenta obtener el precio actual para la evaluación retroactiva."""
+        """Intenta obtener el precio actual para la evaluación retroactiva priorizando Alpaca."""
         try:
             if not symbol:
                 return None
-            import yfinance as yf
-            df = yf.download(symbol.replace("-", "-"), period="1d", progress=False)
-            if not df.empty:
-                close = df['Close']
-                last_close = close.iloc[-1] if not isinstance(close, pd.DataFrame) else close.iloc[-1, 0]
-                return _scalar_float(last_close)
+            
+            from config import ASSETS, BROKERS_CONFIG
+            is_crypto = "-USD" in symbol or "/" in symbol or symbol in ASSETS.get("crypto", [])
+            alp_sym = symbol.replace("-USD", "/USD") if "-USD" in symbol else symbol
+
+            # 1. Priorizar Alpaca Market Data (Midpoint no sesgado, sin rate limits de Yahoo)
+            if self.data_fetcher and getattr(self.data_fetcher, 'alpaca_client', None) and not symbol.endswith("=X"):
+                try:
+                    if is_crypto:
+                        from alpaca.data.requests import CryptoLatestQuoteRequest
+                        from alpaca.data.historical import CryptoHistoricalDataClient
+                        crypto_client = CryptoHistoricalDataClient(
+                            api_key=BROKERS_CONFIG["alpaca"]["api_key"],
+                            secret_key=BROKERS_CONFIG["alpaca"]["secret_key"]
+                        )
+                        req = CryptoLatestQuoteRequest(symbol_or_symbols=alp_sym)
+                        quote = crypto_client.get_crypto_latest_quote(req)
+                        if alp_sym in quote:
+                            ask = float(quote[alp_sym].ask_price or 0.0)
+                            bid = float(quote[alp_sym].bid_price or 0.0)
+                            if ask > 0 and bid > 0:
+                                return (ask + bid) / 2.0
+                            return ask if ask > 0 else bid
+                    else:
+                        from alpaca.data.requests import StockLatestQuoteRequest
+                        req = StockLatestQuoteRequest(symbol_or_symbols=alp_sym)
+                        quote = self.data_fetcher.alpaca_client.get_stock_latest_quote(req)
+                        if alp_sym in quote:
+                            ask = float(quote[alp_sym].ask_price or 0.0)
+                            bid = float(quote[alp_sym].bid_price or 0.0)
+                            if ask > 0 and bid > 0:
+                                return (ask + bid) / 2.0
+                            return ask if ask > 0 else bid
+                except Exception:
+                    pass
+
+            # 2. Respaldo para Forex o cuando Alpaca no esté disponible
+            if symbol.endswith("=X") or not self.data_fetcher or not getattr(self.data_fetcher, 'alpaca_client', None):
+                import yfinance as yf
+                df = yf.download(symbol.replace("-", "-"), period="1d", progress=False)
+                if not df.empty:
+                    close = df['Close']
+                    last_close = close.iloc[-1] if not isinstance(close, pd.DataFrame) else close.iloc[-1, 0]
+                    return _scalar_float(last_close)
         except Exception as e:
             logger.debug(f"PostMortem no pudo obtener precio para {symbol}: {e}")
         return None

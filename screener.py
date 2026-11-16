@@ -8,17 +8,8 @@ acciones con alto volumen o grandes movimientos.
 
 import logging
 import requests
-import urllib3
 from typing import List
 from config import BROKERS_CONFIG, SCREENER_CONFIG
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-# Parche global para evitar errores SSL en Windows/VMs sin certificados
-original_request = requests.Session.request
-def patched_request(self, method, url, **kwargs):
-    kwargs['verify'] = False
-    return original_request(self, method, url, **kwargs)
-requests.Session.request = patched_request
 
 logger = logging.getLogger(__name__)
 

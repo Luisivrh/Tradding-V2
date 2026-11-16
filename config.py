@@ -182,6 +182,10 @@ RISK_CONFIG = {
     # Trailing Stop adaptativo basado en ATR activo por defecto
     "trailing_stop_enabled": True,
     
+    # [FASE 2] Blindaje Especulativo (Sandbox Control)
+    "max_speculative_dollars": 500.0,       # Máximo $500 USD por posición en warrants y pennys
+    "max_speculative_portfolio_pct": 0.10,  # Máximo 10% del portafolio invertido en warrants y pennys
+    
     # Time-based exit
     "max_hold_days": 30,            # Cerrar si pasa 1 mes
 }

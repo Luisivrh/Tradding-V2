@@ -58,9 +58,16 @@ class RiskManager:
     Guarda todas las compras en portfolio.json para evitar compras duplicadas.
     Registra operaciones cerradas en audit_log.json.
     """
-    def __init__(self, starting_capital: float = None):
+    def __init__(self, starting_capital: float = None, in_memory: bool = False, load_snapshot: bool = False):
+        """
+        in_memory=True: nunca escribe portfolio.json ni audit_log.json.
+        load_snapshot=True (solo con in_memory): carga portfolio.json en modo SOLO LECTURA
+        para que el dry-run evalúe las posiciones reales. El backtester lo deja en False.
+        """
         self.portfolio_file = Path("portfolio.json")
         self.audit_file = Path("audit_log.json")
+        self.in_memory = in_memory
+        self.load_snapshot = load_snapshot
         self.starting_capital = starting_capital if starting_capital else RISK_CONFIG["starting_capital"]
         self.forex_starting_capital = RISK_CONFIG.get("forex_starting_capital", 10000.0)
         
@@ -71,13 +78,18 @@ class RiskManager:
         self.trade_history = []
         self.max_pyramid = 3 # Máximo 3 compras (DCA) del mismo activo
         
-        self.load_portfolio()
-        if not self.audit_file.exists():
-            with open(self.audit_file, 'w', encoding='utf-8') as f:
-                json.dump([], f)
-        
+        if not self.in_memory:
+            self.load_portfolio()
+            if not self.audit_file.exists():
+                with open(self.audit_file, 'w', encoding='utf-8') as f:
+                    json.dump([], f)
+        elif self.load_snapshot:
+            self.load_portfolio()  # Solo lectura: save_portfolio() sigue bloqueado por in_memory
+
     def load_portfolio(self):
         """Carga el estado del portafolio desde el disco (Anti-Amnesia)."""
+        if self.in_memory and not self.load_snapshot:
+            return
         if self.portfolio_file.exists():
             try:
                 with open(self.portfolio_file, 'r', encoding='utf-8') as f:
@@ -112,6 +124,8 @@ class RiskManager:
 
     def save_portfolio(self):
         """Guarda el estado del portafolio en el disco."""
+        if self.in_memory:
+            return
         try:
             data = {
                 "starting_capital": self.starting_capital,
@@ -144,18 +158,19 @@ class RiskManager:
         return "normal"
 
     def sync_with_broker(self, alpaca_client):
-        """Sincroniza el portafolio local con las posiciones reales de Alpaca."""
+        """Sincroniza el portafolio local con las posiciones reales de Alpaca de forma inmutable."""
         if not alpaca_client:
             return
             
         try:
             account = alpaca_client.get_account()
-            self.current_capital = float(account.cash)
+            # [BLOQUEANTE 4 CORREGIDO] Usar cash o equity real, NO buying_power que en cuentas con margen infla el capital 2x a 4x
+            self.current_capital = float(account.cash if hasattr(account, 'cash') else account.equity)
             
             real_positions = alpaca_client.get_all_positions()
             real_symbols = []
             
-            logger.info("🔄 Sincronizando portafolio interno con Alpaca...")
+            logger.info("🔄 Sincronizando portafolio interno con Alpaca (SSOT)...")
             
             for pos in real_positions:
                 symbol = pos.symbol.replace("/", "-") if "/" in pos.symbol else pos.symbol
@@ -168,22 +183,34 @@ class RiskManager:
                 
                 side_str = "BUY" if "long" in str(pos.side).lower() else "SELL"
                 
-                # Si no está localmente, lo agregamos con stops genéricos de la categoría
+                # Si no está localmente, lo agregamos conservando la fecha real si es posible
                 if symbol not in self.positions:
+                    entry_date = str(datetime.now())
+                    try:
+                        from alpaca.trading.requests import GetOrdersRequest
+                        from alpaca.trading.enums import QueryOrderStatus, OrderSide
+                        alp_sym = symbol.replace("-USD", "/USD") if "-USD" in symbol else symbol
+                        req = GetOrdersRequest(status=QueryOrderStatus.CLOSED, symbols=[alp_sym], side=OrderSide.BUY, limit=1)
+                        closed_buys = alpaca_client.get_orders(filter=req)
+                        if closed_buys and closed_buys[0].filled_at:
+                            entry_date = closed_buys[0].filled_at.isoformat()
+                    except Exception:
+                        pass
+
                     rules = MICROSTRUCTURE_CONFIG[asset_type]
-                    # Asumimos un ATR del 5% del precio si no tenemos histórico
-                    fallback_atr = avg_price * 0.05 
+                    fallback_atr = current_price * 0.05 
                     sl_dist = fallback_atr * rules["atr_sl_mult"]
                     tp_pct = rules.get("take_profit_pct", RISK_CONFIG["take_profit_pct"])
                     
-                    stop_loss = avg_price - sl_dist if side_str == "BUY" else avg_price + sl_dist
-                    take_profit = avg_price * (1 + tp_pct) if side_str == "BUY" else avg_price * (1 - tp_pct)
+                    # [FASE 0] Stop anclado a current_price para evitar paradas artificiales inmediatas
+                    stop_loss = current_price - sl_dist if side_str == "BUY" else current_price + sl_dist
+                    take_profit = current_price * (1 + tp_pct) if side_str == "BUY" else current_price * (1 - tp_pct)
                     
                     self.positions[symbol] = [Position(
                         symbol=symbol,
                         asset_type=asset_type,
                         entry_price=avg_price,
-                        entry_date=str(datetime.now()), 
+                        entry_date=entry_date, 
                         side=side_str,
                         quantity=qty,
                         stop_loss=stop_loss,
@@ -193,10 +220,24 @@ class RiskManager:
                         highest_price=max(avg_price, current_price),
                         last_known_price=current_price
                     )]
+                    logger.warning(f"🔄 [{symbol}] Reconciliada posición desconocida desde Alpaca: Qty={qty}, Entrada={avg_price}, Stop={stop_loss:.4f}")
                 else:
-                    # Actualizar valores sin perder configuración local (DCA)
-                    # Simplificado: si Alpaca tiene una qty diferente, asumimos reajuste
-                    pass 
+                    # [BLOQUEANTE 3 CORREGIDO] Actualizar valores en vivo sin multiplicar cantidades en compras acumuladas (DCA)
+                    total_local_qty = sum(p.quantity for p in self.positions[symbol])
+                    if total_local_qty > 0 and len(self.positions[symbol]) > 1:
+                        # Escalar proporcionalmente cada lote para que la suma total sea exactamente qty de Alpaca
+                        scale = qty / total_local_qty
+                        for p in self.positions[symbol]:
+                            p.quantity *= scale
+                            p.last_known_price = current_price
+                            p.highest_price = max(p.highest_price, current_price)
+                            p.lowest_price = min(p.lowest_price, current_price)
+                    elif len(self.positions[symbol]) == 1:
+                        p = self.positions[symbol][0]
+                        p.quantity = qty
+                        p.last_known_price = current_price
+                        p.highest_price = max(p.highest_price, current_price)
+                        p.lowest_price = min(p.lowest_price, current_price)
                 
             forex_symbols = ASSETS.get("forex", [])
             symbols_to_remove = [sym for sym in self.positions.keys() if sym not in real_symbols and sym not in forex_symbols]
@@ -251,9 +292,20 @@ class RiskManager:
         # Limitamos por el capital máximo permitido para la categoría
         final_capital = min(capital_by_risk, max_capital_allowed)
         
+        # [FASE 2.1] Tope absoluto en dólares para activos especulativos ($500 USD)
+        if asset_type in ["warrant", "penny"]:
+            max_spec_dollars = RISK_CONFIG.get("max_speculative_dollars", 500.0)
+            final_capital = min(final_capital, max_spec_dollars)
+
         # Validar capital líquido real
         available_cash = self.forex_capital if is_forex else self.current_capital
         final_capital = min(final_capital, available_cash)
+
+        # Validar que alcance para comprar al menos 1 acción entera en activos no cripto
+        if not is_forex and asset_type != "crypto":
+            if (final_capital / entry_price) < 1.0:
+                logger.info(f"Capital asignado (${final_capital:.2f}) no alcanza para 1 acción de ${entry_price:.2f}.")
+                return 0.0
         
         return final_capital / entry_price
 
@@ -264,6 +316,24 @@ class RiskManager:
         if spread_pct > rules["max_spread_pct"]:
             logger.warning(f"[{symbol}] Rechazado: Spread excesivo ({spread_pct*100:.2f}% > {rules['max_spread_pct']*100:.2f}%) para categoría {asset_type.upper()}.")
             return False
+
+        # [FASE 2.2] Límite de Exposición Agregada Especulativa (≤ 10% del portafolio)
+        if asset_type in ["warrant", "penny"]:
+            total_val = self.get_total_portfolio_value(is_forex=False)
+            max_spec_exposure = total_val * RISK_CONFIG.get("max_speculative_portfolio_pct", 0.10)
+            current_spec_cost = sum(
+                p.quantity * p.entry_price 
+                for sym, p_list in self.positions.items() 
+                for p in p_list 
+                if self.categorize_asset(sym, p.entry_price) in ["warrant", "penny"]
+            )
+            pending_spec_cost = getattr(self, "pending_speculative_cost", 0.0)
+            if (current_spec_cost + pending_spec_cost) >= max_spec_exposure:
+                logger.warning(
+                    f"[{symbol}] Rechazado: Exposición agregada especulativa del 10% alcanzada "
+                    f"(${current_spec_cost + pending_spec_cost:,.2f} >= ${max_spec_exposure:,.2f})."
+                )
+                return False
             
         # Contar por bloque general
         macro_group = "forex" if asset_type == "forex" else ("crypto" if asset_type == "crypto" else "stocks")
@@ -295,11 +365,12 @@ class RiskManager:
 
         return True
 
-    def open_position(self, symbol: str, price: float, side: str, atr: float, spread_pct: float, score: float, entry_date: str) -> Optional[Position]:
+    def open_position(self, symbol: str, price: float, side: str, atr: float, spread_pct: float, score: float, entry_date: str, forced_quantity: Optional[float] = None, bypass_filters: bool = False) -> Optional[Position]:
         """Abre posición usando reglas ATR y Límites Estrictos."""
         
         asset_type = self.categorize_asset(symbol, price)
-        if not self.can_open_position(symbol, price, spread_pct, asset_type):
+        # [PUNTO 6 CORREGIDO] Si la orden ya llenó en el broker (bypass_filters=True), registrar incondicionalmente
+        if not bypass_filters and not self.can_open_position(symbol, price, spread_pct, asset_type):
             return None
         
         is_forex = asset_type == "forex"
@@ -308,7 +379,11 @@ class RiskManager:
         # Evitar ATR 0
         safe_atr = atr if atr > 0 else price * 0.05
         
-        quantity = self._calculate_position_size(price, safe_atr, asset_type, is_forex)
+        if forced_quantity is not None and forced_quantity > 0:
+            quantity = float(forced_quantity)
+        else:
+            quantity = self._calculate_position_size(price, safe_atr, asset_type, is_forex)
+            
         if quantity <= 0: return None
         
         # Calcular stops usando ATR y take profit configurado por categoría
@@ -418,8 +493,8 @@ class RiskManager:
         self.save_portfolio()
         return forced_exits
 
-    def close_position(self, symbol: str, price: float, reason: str, exit_date: str, exit_atr: float = 0.0, exit_spread: float = 0.0, exit_score: float = 0.0) -> float:
-        """Cierra todas las posiciones de un activo, guarda historial y escribe en Audit Log."""
+    def close_position(self, symbol: str, price: float, reason: str, exit_date: str, exit_atr: float = 0.0, exit_spread: float = 0.0, exit_score: float = 0.0, quantity_to_close: Optional[float] = None) -> float:
+        """Cierra posiciones de un activo (total o parcialmente), guarda historial y escribe en Audit Log."""
         if symbol not in self.positions or not self.positions[symbol]:
             return 0.0
             
@@ -430,7 +505,19 @@ class RiskManager:
         
         audit_entries = []
         
+        total_available = sum(p.quantity for p in self.positions[symbol])
+        qty_target = quantity_to_close if (quantity_to_close is not None and quantity_to_close > 0) else total_available
+        qty_remaining_to_close = min(qty_target, total_available)
+        
+        new_positions_list = []
+        
         for pos in self.positions[symbol]:
+            if qty_remaining_to_close <= 1e-6:
+                new_positions_list.append(pos)
+                continue
+                
+            qty_closing_lot = min(pos.quantity, qty_remaining_to_close)
+            
             # Always ensure MFE/MAE are relative to final values
             pos.highest_price = max(pos.highest_price, price)
             pos.lowest_price = min(pos.lowest_price, price)
@@ -439,12 +526,12 @@ class RiskManager:
             mae_pct = (pos.lowest_price - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0
             
             if pos.side == "BUY":
-                pnl = (price - pos.entry_price) * pos.quantity
+                pnl = (price - pos.entry_price) * qty_closing_lot
             else:
-                pnl = (pos.entry_price - price) * pos.quantity
+                pnl = (pos.entry_price - price) * qty_closing_lot
                 
             total_pnl += pnl
-            cost_basis = pos.entry_price * pos.quantity
+            cost_basis = pos.entry_price * qty_closing_lot
             total_revenue += cost_basis + pnl
             
             pnl_pct = pnl / cost_basis if cost_basis > 0 else 0
@@ -459,6 +546,7 @@ class RiskManager:
                 "side": pos.side,
                 "entry_price": pos.entry_price,
                 "exit_price": price,
+                "quantity": qty_closing_lot,
                 "pnl": pnl,
                 "reason": reason,
                 "date": exit_date
@@ -471,7 +559,7 @@ class RiskManager:
                 "asset_type": pos.asset_type,
                 "entry_price": pos.entry_price,
                 "exit_price": price,
-                "qty": pos.quantity,
+                "qty": qty_closing_lot,
                 "cost_basis": cost_basis,
                 "profit_usd": pnl,
                 "profit_pct": pnl_pct,
@@ -500,21 +588,32 @@ class RiskManager:
                 "exit_date": exit_date
             })
             
+            qty_remaining_to_close -= qty_closing_lot
+            pos.quantity -= qty_closing_lot
+            
+            if pos.quantity > 1e-6:
+                new_positions_list.append(pos)
+            
         if is_forex: self.forex_capital += total_revenue
         else: self.current_capital += total_revenue
             
-        del self.positions[symbol]
+        if new_positions_list:
+            self.positions[symbol] = new_positions_list
+        else:
+            del self.positions[symbol]
+            
         self.save_portfolio()
         
-        # Guardar en audit_log.json
-        try:
-            with open(self.audit_file, 'r+', encoding='utf-8') as f:
-                logs = json.load(f)
-                logs.extend(audit_entries)
-                f.seek(0)
-                json.dump(logs, f, indent=4)
-        except Exception as e:
-            logger.error(f"Error escribiendo en audit_log.json: {e}")
+        # Guardar en audit_log.json solo si no está en modo memoria
+        if not self.in_memory:
+            try:
+                with open(self.audit_file, 'r+', encoding='utf-8') as f:
+                    logs = json.load(f)
+                    logs.extend(audit_entries)
+                    f.seek(0)
+                    json.dump(logs, f, indent=4)
+            except Exception as e:
+                logger.error(f"Error escribiendo en audit_log.json: {e}")
         
         logger.info(f"🔴 VENTA INTERNA: {symbol} @ {price:.4f} | PnL: ${total_pnl:.2f} | Razón: {reason}")
         return total_pnl
