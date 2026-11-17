@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 import pandas as pd
 from pathlib import Path
+from date_utils import parse_iso_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ class PostMortemAnalyzer:
                 if entry["plus_1d"] is not None and entry["plus_3d"] is not None and entry["plus_5d"] is not None:
                     continue
                     
-                date_signal = datetime.fromisoformat(entry["date"])
+                date_signal = parse_iso_datetime(entry["date"], default=datetime.now())
                 days_passed = (datetime.now() - date_signal).days
                 
                 if days_passed >= 1 and self.data_fetcher:
@@ -180,8 +181,8 @@ class PostMortemAnalyzer:
             if 'exit_date' not in trade:
                 continue
             try:
-                exit_date = datetime.fromisoformat(trade['exit_date'])
-            except (TypeError, ValueError):
+                exit_date = parse_iso_datetime(trade['exit_date'])
+            except Exception:
                 logger.warning("Post-Mortem omite trade con exit_date inválida: %s", trade.get('symbol'))
                 continue
             days_passed = (now - exit_date).total_seconds() / 86400.0
@@ -195,15 +196,11 @@ class PostMortemAnalyzer:
                     needs_update = True
             
             if needs_update:
-                current_price = self._get_current_price(trade.get('symbol'))
                 exit_price = _scalar_float(trade.get('exit_price'))
                 if not exit_price or exit_price <= 0:
-                    logger.warning(
-                        "Post-Mortem omite %s: exit_price inválido (%s)",
-                        trade.get('symbol'),
-                        trade.get('exit_price'),
-                    )
+                    logger.debug("Post-Mortem omite %s: exit_price inválido (%s)", trade.get('symbol'), trade.get('exit_price'))
                     continue
+                current_price = self._get_current_price(trade.get('symbol'))
                 if current_price and current_price > 0:
                     for days, label in milestones:
                         price_key = f"price_after_{label}"

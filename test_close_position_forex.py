@@ -40,6 +40,7 @@ class ClosePositionForexCapitalTest(unittest.TestCase):
         self.assertAlmostEqual(rm.forex_capital, forex_cash_before - cost, places=6)
         self.assertEqual(rm.current_capital, alpaca_cash_before)
 
+        qty = position.quantity
         exit_price = price * 1.01
         pnl = rm.close_position(
             symbol=symbol,
@@ -48,7 +49,7 @@ class ClosePositionForexCapitalTest(unittest.TestCase):
             exit_date="2026-11-02T12:00:00",
         )
 
-        expected_revenue = position.quantity * exit_price
+        expected_revenue = qty * exit_price
         self.assertAlmostEqual(pnl, expected_revenue - cost, places=6)
         self.assertAlmostEqual(rm.forex_capital, forex_cash_before + (expected_revenue - cost), places=6)
         self.assertEqual(rm.current_capital, alpaca_cash_before)

@@ -15,6 +15,7 @@ import json
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional
+from date_utils import parse_iso_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -307,8 +308,8 @@ class OrderManager:
             if symbol in risk_manager.positions and risk_manager.positions[symbol]:
                 entry_p = risk_manager.positions[symbol][0].entry_price
                 try:
-                    dt_in = datetime.fromisoformat(risk_manager.positions[symbol][0].entry_date)
-                    hold_hours = (datetime.now() - dt_in).total_seconds() / 3600.0
+                    dt_in = parse_iso_datetime(risk_manager.positions[symbol][0].entry_date)
+                    hold_hours = max(0.0, (datetime.now() - dt_in).total_seconds() / 3600.0)
                 except Exception:
                     hold_hours = 0.0
 

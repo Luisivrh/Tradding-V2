@@ -28,6 +28,7 @@ import pandas as pd
 from pricing_utils import round_order_price, resolve_exit_price
 from order_manager import OrderManager
 from protective_stops import ProtectiveStopManager, is_stock_symbol
+from date_utils import parse_iso_datetime
 
 # Forzar salida en consola a UTF-8 para evitar errores con emojis en Windows
 if sys.stdout.encoding.lower() != 'utf-8':
@@ -932,8 +933,8 @@ class TradingBot:
                                                 })
                                                 cost_basis = avg_entry * total_qty_to_sell
                                                 pnl_pct = pnl / cost_basis if cost_basis > 0 else 0
-                                                dt_in = datetime.fromisoformat(pos_list[0].entry_date)
-                                                hold_time = (datetime.now() - dt_in).total_seconds() / 3600.0
+                                                dt_in = parse_iso_datetime(pos_list[0].entry_date, default=datetime.now())
+                                                hold_time = max(0.0, (datetime.now() - dt_in).total_seconds() / 3600.0)
                                                 if not self.dry_run:
                                                     self.telegram.send_sell_alert(
                                                         symbol=symbol,
@@ -1000,8 +1001,8 @@ class TradingBot:
                                             })
                                             cost_basis = avg_entry * total_qty_to_sell
                                             pnl_pct = pnl / cost_basis if cost_basis > 0 else 0
-                                            dt_in = datetime.fromisoformat(pos_list[0].entry_date)
-                                            hold_time = (datetime.now() - dt_in).total_seconds() / 3600.0
+                                            dt_in = parse_iso_datetime(pos_list[0].entry_date, default=datetime.now())
+                                            hold_time = max(0.0, (datetime.now() - dt_in).total_seconds() / 3600.0)
                                             if not self.dry_run:
                                                 self.telegram.send_sell_alert(
                                                     symbol=symbol,
@@ -1051,8 +1052,8 @@ class TradingBot:
                             })
                             cost_basis = avg_entry * total_qty_to_sell
                             pnl_pct = pnl / cost_basis if cost_basis > 0 else 0
-                            dt_in = datetime.fromisoformat(pos_list[0].entry_date)
-                            hold_time = (datetime.now() - dt_in).total_seconds() / 3600.0
+                            dt_in = parse_iso_datetime(pos_list[0].entry_date, default=datetime.now())
+                            hold_time = max(0.0, (datetime.now() - dt_in).total_seconds() / 3600.0)
                             if not self.dry_run:
                                 self.telegram.send_sell_alert(
                                     symbol=symbol,
@@ -1153,7 +1154,7 @@ class TradingBot:
                     data = json.load(f)
                 last_time_str = data.get("last_heartbeat")
                 if last_time_str:
-                    last_time = datetime.fromisoformat(last_time_str)
+                    last_time = parse_iso_datetime(last_time_str, default=now)
                     diff_mins = (now - last_time).total_seconds() / 60.0
                     
                     if diff_mins > 60:

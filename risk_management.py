@@ -13,6 +13,7 @@ from dataclasses import dataclass, asdict
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime
 from config import RISK_CONFIG, ASSETS, MICROSTRUCTURE_CONFIG
+from date_utils import parse_iso_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -581,7 +582,8 @@ class RiskManager:
                     
                 # 4. Timeout diferenciado por microestructura del activo
                 else:
-                    days_held = (datetime.now() - datetime.fromisoformat(pos.entry_date)).days
+                    entry_dt = parse_iso_datetime(pos.entry_date, default=datetime.now())
+                    days_held = (datetime.now() - entry_dt).days
                     max_hold = rules.get("max_hold_days", RISK_CONFIG.get("max_hold_days", 30))
                     if days_held >= max_hold:
                         sell_reasons.append(f"MAX_TIME ({days_held}d >= {max_hold}d {pos.asset_type.upper()})")
@@ -642,9 +644,9 @@ class RiskManager:
             
             pnl_pct = pnl / cost_basis if cost_basis > 0 else 0
             
-            dt_in = datetime.fromisoformat(pos.entry_date)
-            dt_out = datetime.fromisoformat(exit_date)
-            hold_hours = (dt_out - dt_in).total_seconds() / 3600.0
+            dt_in = parse_iso_datetime(pos.entry_date, default=datetime.now())
+            dt_out = parse_iso_datetime(exit_date, default=datetime.now())
+            hold_hours = max(0.0, (dt_out - dt_in).total_seconds() / 3600.0)
             
             # Record para historial interno
             hist_entry = {

@@ -111,6 +111,41 @@ class TradingRulesValidationTest(unittest.TestCase):
         self.assertEqual(len(forced), 1)
         self.assertIn("MAX_TIME", forced[0]["details"]["reason"])
 
+    def test_isoformat_z_suffix_compatibility(self):
+        """Verifica que fechas con sufijo 'Z' (Alpaca/UTC) no provoquen ValueError ni TypeError en check_exit_conditions y close_position."""
+        rm = RiskManager(starting_capital=50000)
+        # Cadena real que falló en producción: '2026-10-05T13:34:23.883409Z'
+        rm.positions["TSLA"] = [
+            Position(
+                symbol="TSLA",
+                asset_type="normal",
+                entry_price=350.0,
+                entry_date="2026-10-05T13:34:23.883409Z",
+                side="BUY",
+                quantity=10,
+                stop_loss=300.0,
+                take_profit=450.0,
+                atr_at_entry=10.0,
+                spread_at_entry=0.001
+            )
+        ]
+        
+        current_prices = {"TSLA": {"price": 360.0, "atr": 10.0, "spread": 0.001}}
+        # No debe lanzar excepción y debe detectar MAX_TIME (más de 30 días)
+        forced = rm.check_exit_conditions(current_prices)
+        self.assertEqual(len(forced), 1)
+        self.assertIn("MAX_TIME", forced[0]["details"]["reason"])
+
+        # Cerrar posición con exit_date también conteniendo 'Z'
+        pnl = rm.close_position(
+            symbol="TSLA",
+            price=360.0,
+            reason="MAX_TIME",
+            exit_date="2026-11-17T14:30:05.123456Z"
+        )
+        self.assertEqual(pnl, 100.0)
+        self.assertNotIn("TSLA", rm.positions)
+
     def test_category_specific_take_profit(self):
         rm = RiskManager(starting_capital=50000)
         pos = rm.open_position(
