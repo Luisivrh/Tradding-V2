@@ -237,8 +237,8 @@ class PostMortemAnalyzer:
             except Exception as e:
                 logger.error(f"Error guardando audit_log.json: {e}")
 
-    def generate_weekly_report(self) -> str:
-        """Genera el reporte estadístico de Post-Mortem."""
+    def generate_weekly_report(self, alpaca_client=None, risk_manager=None) -> str:
+        """Genera el reporte estadístico de Post-Mortem y calcula Alpha semanal contra SPY."""
         if not self.audit_file.exists():
             return "No hay datos de auditoría suficientes para el reporte."
             
@@ -338,5 +338,44 @@ class PostMortemAnalyzer:
         report += "\n🩸 <b>TOP 3 PEORES TRADES:</b>\n"
         for t in top_peores[:3]:
             report += f"• {t['symbol']} | {t.get('profit_pct',0)*100:+.2f}% | {t.get('reason','')} \n"
+
+        # Benchmark semanal contra S&P 500 (SPY) y cálculo de Alpha
+        try:
+            account_weekly_ret = None
+            if alpaca_client:
+                try:
+                    from alpaca.trading.requests import GetPortfolioHistoryRequest
+                    req = GetPortfolioHistoryRequest(period="1W", timeframe="1D")
+                    hist = alpaca_client.get_portfolio_history(history_filter=req)
+                    if hist and hasattr(hist, 'equity') and hist.equity and len(hist.equity) >= 2:
+                        start_eq = float(hist.equity[0])
+                        end_eq = float(hist.equity[-1])
+                        if start_eq > 0:
+                            account_weekly_ret = (end_eq - start_eq) / start_eq
+                except Exception as e_hist:
+                    logger.debug(f"Error consultando get_portfolio_history en Alpaca: {e_hist}")
+
+            if account_weekly_ret is None and risk_manager:
+                base_eq = getattr(risk_manager, 'weekly_baseline_equity', None)
+                curr_eq = risk_manager.get_total_portfolio_value(is_forex=False)
+                if base_eq and base_eq > 0:
+                    account_weekly_ret = (curr_eq - base_eq) / base_eq
+
+            spy_weekly_ret = None
+            if self.data_fetcher:
+                spy_df = self.data_fetcher.fetch_stock("SPY")
+                if not spy_df.empty and len(spy_df) >= 6:
+                    spy_weekly_ret = float((spy_df["Close"].iloc[-1] - spy_df["Close"].iloc[-6]) / spy_df["Close"].iloc[-6])
+
+            if account_weekly_ret is not None and spy_weekly_ret is not None:
+                alpha_pct = (account_weekly_ret - spy_weekly_ret) * 100.0
+                report += f"\n🌐 <b>BENCHMARK SEMANAL (vs S&P 500 / SPY):</b>\n"
+                report += f"• Retorno Cuenta (1S): {account_weekly_ret*100:+.2f}%\n"
+                report += f"• Retorno SPY (1S):    {spy_weekly_ret*100:+.2f}%\n"
+                report += f"• Alpha Generado:      {alpha_pct:+.2f}%\n"
+            elif spy_weekly_ret is not None:
+                report += f"\n🌐 <b>BENCHMARK SEMANAL:</b>\n• Retorno SPY (5d): {spy_weekly_ret*100:+.2f}%\n"
+        except Exception as e:
+            logger.debug(f"Error generando benchmark semanal: {e}")
             
         return report

@@ -191,6 +191,25 @@ RISK_CONFIG = {
 }
 
 # ==========================================
+# REGIMEN DE MERCADO (FILTRO MACRO)
+# ==========================================
+MARKET_REGIME_CONFIG = {
+    "enabled": True,
+    "benchmark": "SPY",                  # Índice rector de Wall Street
+    "sma_period": 200,                   # Media móvil simple de 200 días
+    "allow_stocks_if_bearish": False,    # Si SPY < SMA200, bloquear compras de acciones
+}
+
+# ==========================================
+# FRENO DE EMERGENCIA POR PERDIDAS (CIRCUIT BREAKER)
+# ==========================================
+CIRCUIT_BREAKER_CONFIG = {
+    "enabled": True,
+    "max_daily_loss_pct": 0.02,          # Congelar compras si la cuenta pierde >= 2.0% en el día
+    "max_weekly_loss_pct": 0.05,         # Congelar compras si la cuenta pierde >= 5.0% en la semana
+}
+
+# ==========================================
 # HORARIOS (MODO AUTO) Y STOPS EN EL BROKER
 # ==========================================
 # El cron corre `python main.py --mode auto` cada 15 minutos y el código decide qué hacer:
@@ -217,6 +236,14 @@ AI_CONFIG = {
     "use_for_validation": True,    # Validar señales con IA
     "use_for_news": True,           # Analizar noticias
     "sentiment_impact": 0.15,       # Impacto del sentimiento (15%) para no hundir señales técnicas con 5.0 neutral
+}
+
+# ==========================================
+# MONITOR EXTERNO (DEAD MAN'S SWITCH)
+# ==========================================
+HEALTHCHECK_CONFIG = {
+    "enabled": True,
+    "url": os.environ.get("HEALTHCHECK_URL", ""),  # URL ping de healthchecks.io o similar
 }
 # ==========================================
 # NOTICIAS Y MACRO

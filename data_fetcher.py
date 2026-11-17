@@ -487,6 +487,37 @@ class DataFetcher:
             
         return data
 
+    def get_market_regime(self, benchmark: str = "SPY", sma_period: int = 200) -> dict:
+        """
+        Determina si el mercado general está en régimen ALCISTA o BAJISTA
+        comparando el precio actual del benchmark (SPY) contra su SMA de 200 días.
+        """
+        try:
+            df = self.fetch_stock(benchmark)
+            if df.empty or len(df) < sma_period:
+                logger.warning(f"No hay suficientes datos de {benchmark} ({len(df)}/{sma_period}). Asumiendo régimen neutral.")
+                return {"is_bullish": True, "benchmark": benchmark, "price": 0.0, "sma": 0.0, "distance_pct": 0.0}
+
+            sma_series = df["Close"].rolling(window=sma_period).mean()
+            last_price = float(df["Close"].iloc[-1])
+            sma_val = float(sma_series.iloc[-1])
+            is_bullish = last_price >= sma_val
+            distance_pct = (last_price - sma_val) / sma_val if sma_val > 0 else 0.0
+
+            status_str = "🟢 ALCISTA (BULL)" if is_bullish else "🔴 BAJISTA / DEFENSIVO (BEAR)"
+            logger.info(f"🌐 Régimen de Mercado ({benchmark}): {status_str} | Precio: ${last_price:.2f} | SMA{sma_period}: ${sma_val:.2f} ({distance_pct*100:+.2f}%)")
+
+            return {
+                "is_bullish": is_bullish,
+                "benchmark": benchmark,
+                "price": last_price,
+                "sma": sma_val,
+                "distance_pct": distance_pct
+            }
+        except Exception as e:
+            logger.error(f"Error calculando régimen de mercado para {benchmark}: {e}")
+            return {"is_bullish": True, "benchmark": benchmark, "price": 0.0, "sma": 0.0, "distance_pct": 0.0}
+
 
 # ==========================================
 # PREPARACION DE DATOS

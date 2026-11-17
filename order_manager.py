@@ -62,12 +62,14 @@ class OrderManager:
         asset_type: str = "normal",
         details: Optional[Dict] = None,
         kind: str = KIND_TRADE,
-        stop_price: float = 0.0
+        stop_price: float = 0.0,
+        signal_price: float = 0.0
     ):
         """
         Registra una nueva orden pendiente de confirmación.
         kind=KIND_TRADE: orden de entrada/salida del bot.
         kind=KIND_PROTECTIVE_STOP: stop loss que vive en Alpaca (GTC) protegiendo la posición.
+        signal_price: precio de la señal cuando se generó la oportunidad.
         """
         self.pending_orders[order_id] = {
             "order_id": order_id,
@@ -77,6 +79,7 @@ class OrderManager:
             "qty": float(qty),
             "limit_price": float(limit_price),
             "stop_price": float(stop_price),
+            "signal_price": float(signal_price),
             "kind": kind,
             "asset_type": asset_type,
             "details": details or {},
@@ -249,6 +252,28 @@ class OrderManager:
         spread = details.get("spread", 0.001)
         score = details.get("score", 7.0)
 
+        # [CORRECCIÓN SLIPPAGE EN STOPS Y ÓRDENES]
+        # Para órdenes STOP, la referencia esperada es el stop_price (precio de disparo).
+        # Para órdenes de trading es signal_price o limit_price.
+        ref_price = 0.0
+        if order_info.get("kind") == KIND_PROTECTIVE_STOP or float(order_info.get("stop_price") or 0.0) > 0:
+            ref_price = float(order_info.get("stop_price") or 0.0)
+        else:
+            ref_price = float(order_info.get("signal_price") or order_info.get("limit_price") or 0.0)
+
+        if ref_price <= 0.0:
+            ref_price = price
+
+        if side == "BUY":
+            slippage_usd = (ref_price - price) * qty
+            slippage_pct = ((ref_price - price) / ref_price) * 100.0 if ref_price > 0 else 0.0
+        else:
+            slippage_usd = (price - ref_price) * qty
+            slippage_pct = ((price - ref_price) / ref_price) * 100.0 if ref_price > 0 else 0.0
+
+        if abs(slippage_usd) > 0.01:
+            logger.info(f"📊 [{symbol}] Slippage registrado ({side}): ${slippage_usd:+.2f} ({slippage_pct:+.2f}%) [Ref: ${ref_price:.4f} -> Real: ${price:.4f}]")
+
         if side == "BUY":
             position = risk_manager.open_position(
                 symbol=symbol,
@@ -296,7 +321,9 @@ class OrderManager:
                 exit_atr=atr,
                 exit_spread=spread,
                 exit_score=score,
-                quantity_to_close=qty
+                quantity_to_close=qty,
+                slippage_usd=slippage_usd,
+                slippage_pct=slippage_pct
             )
             logger.info(f"🔴 [VENTA CONFIRMADA EN BROKER] {symbol}: {qty} acciones @ ${price:.4f} | PnL: ${pnl:.2f}")
             if telegram_bot:

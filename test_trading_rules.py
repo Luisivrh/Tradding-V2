@@ -253,6 +253,190 @@ class TradingRulesValidationTest(unittest.TestCase):
         self.assertFalse(bot.live_trading)
         self.assertIsNone(bot.alpaca_client)
 
+    def test_circuit_breaker_daily_loss(self):
+        """Verifica que el Circuit Breaker diario detecte pérdidas NO realizadas (Mark-to-Market) y congele compras."""
+        rm = RiskManager(starting_capital=100000.0, in_memory=True)
+        # Comprar 100 AAPL a $200 (costo = $20,000, efectivo restante = $80,000)
+        rm.open_position("AAPL", price=200.0, side="BUY", atr=3.0, spread_pct=0.001, score=8.0, entry_date="2026-11-01T10:00:00", forced_quantity=100.0, bypass_filters=True)
+        # Baseline inicial al abrir la sesión: $100,000
+        rm.check_circuit_breaker()
+        self.assertEqual(rm.daily_baseline_equity, 100000.0)
+
+        # Simular caída no realizada de AAPL de $200 a $150 (-25% en la posición, -$5,000 de pérdida flotante)
+        rm.positions["AAPL"][0].last_known_price = 150.0
+        # El equity Mark-to-Market ahora es $80,000 + (100 * $150) = $95,000 (caída del 5.0% > límite del 2.0%)
+        self.assertEqual(rm.get_total_portfolio_value(), 95000.0)
+
+        tripped, reason = rm.check_circuit_breaker()
+        self.assertTrue(tripped)
+        self.assertIn("Freno Diario Activo", reason)
+
+        # can_open_position debe retornar False
+        can_buy = rm.can_open_position("MSFT", price=410.0, spread_pct=0.001, asset_type="normal")
+        self.assertFalse(can_buy)
+
+    def test_circuit_breaker_weekly_loss(self):
+        """Verifica que el Circuit Breaker semanal congele compras si se pierde >= 5.0% en la semana."""
+        rm = RiskManager(starting_capital=100000.0, in_memory=True)
+        rm.check_circuit_breaker()
+        
+        # Simular que la semana empezó en $100,000 y hoy el baseline del día se reinició pero el semanal se conserva
+        rm.weekly_baseline_equity = 100000.0
+        rm.daily_baseline_equity = 95000.0
+        rm.current_capital = 94000.0 # Caída del 6.0% respecto al baseline semanal
+        
+        tripped, reason = rm.check_circuit_breaker()
+        self.assertTrue(tripped)
+        self.assertIn("Freno Semanal Activo", reason)
+
+    def test_market_regime_bearish_blocks_stock_buys(self):
+        """Verifica que un régimen de mercado bajista (SPY < SMA200) bloquee compras de acciones pero no de cripto."""
+        from main import TradingBot
+        from unittest.mock import MagicMock
+        
+        bot = TradingBot(dry_run=True)
+        # Mockear IA para que apruebe y la prueba aísle estrictamente el filtro de régimen de mercado
+        bot.ai_analyzer.audit_risk_veto = MagicMock(return_value=(True, "Aprobado para test"))
+        
+        # Simular que el benchmark SPY está en $480 y su SMA200 está en $500 (régimen bajista)
+        bot.data_fetcher.get_market_regime = MagicMock(return_value={
+            "is_bullish": False,
+            "benchmark": "SPY",
+            "price": 480.0,
+            "sma": 500.0,
+            "distance_pct": -0.04
+        })
+        
+        opps = [
+            {"symbol": "AAPL", "signal_type": "BUY", "score": 8.5, "current_price": 220.0, "details": {"asset_type": "normal"}},
+            {"symbol": "BTC-USD", "signal_type": "BUY", "score": 8.0, "current_price": 65000.0, "details": {"asset_type": "crypto"}}
+        ]
+        
+        validated = bot.validate_signals_with_context(opps)
+        valid_symbols = [o["symbol"] for o in validated]
+        
+        # AAPL (acción) debe haber sido bloqueada por régimen bajista
+        self.assertNotIn("AAPL", valid_symbols)
+        # BTC-USD (cripto) no debe ser bloqueada por el régimen del S&P 500
+        self.assertIn("BTC-USD", valid_symbols)
+
+    def test_slippage_recording(self):
+        """Verifica que close_position registre slippage_usd y slippage_pct en trade_history."""
+        rm = RiskManager(starting_capital=10000.0, in_memory=True)
+        rm.open_position("NVDA", price=120.0, side="BUY", atr=2.0, spread_pct=0.001, score=8.0, entry_date="2026-11-01T10:00:00", forced_quantity=5.0, bypass_filters=True)
+        
+        rm.close_position("NVDA", price=125.0, reason="TAKE_PROFIT", exit_date="2026-11-02T10:00:00", slippage_usd=2.50, slippage_pct=0.40)
+        self.assertEqual(len(rm.trade_history), 1)
+        self.assertEqual(rm.trade_history[0]["slippage_usd"], 2.50)
+        self.assertEqual(rm.trade_history[0]["slippage_pct"], 0.40)
+
+    def test_slippage_for_stop_order(self):
+        """Verifica que las órdenes STOP calculen el slippage contra stop_price y no contra limit_price=0."""
+        from order_manager import OrderManager, KIND_PROTECTIVE_STOP
+        from unittest.mock import MagicMock
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = os.path.join(tmp, "p.json")
+            om = OrderManager(state_file=state_file)
+            rm = RiskManager(starting_capital=10000.0, in_memory=True)
+            rm.open_position("AAPL", price=200.0, side="BUY", atr=3.0, spread_pct=0.001, score=8.0, entry_date="2026-11-01T10:00:00", forced_quantity=10.0, bypass_filters=True)
+
+            om.add_order(
+                order_id="stop_1",
+                client_order_id="TR2_STOP_AAPL_1",
+                symbol="AAPL",
+                side="SELL",
+                qty=10.0,
+                limit_price=0.0,
+                stop_price=190.0,
+                asset_type="normal",
+                kind=KIND_PROTECTIVE_STOP
+            )
+
+            mock_alpaca = MagicMock()
+            mock_order = MagicMock()
+            mock_order.status = "filled"
+            mock_order.filled_qty = "10.0"
+            mock_order.filled_avg_price = "188.50" # Se disparó a 190.0 y llenó a 188.50
+            mock_order.filled_at = None
+            mock_alpaca.get_order_by_id.return_value = mock_order
+
+            om.reconcile_orders(mock_alpaca, rm)
+
+            # Slippage real debe ser (188.50 - 190.00) * 10 = -$15.00, NUNCA -$1,885.00
+            self.assertEqual(len(rm.trade_history), 1)
+            self.assertAlmostEqual(rm.trade_history[0]["slippage_usd"], -15.0)
+            self.assertAlmostEqual(rm.trade_history[0]["slippage_pct"], -0.7894736842, places=4)
+
+    def test_weekly_report_alpaca_history_and_alpha(self):
+        """Verifica que generate_weekly_report use get_portfolio_history de Alpaca y calcule Alpha real contra SPY."""
+        from post_mortem import PostMortemAnalyzer
+        from unittest.mock import MagicMock
+        import pandas as pd
+        import json
+
+        # Crear audit_log mínimo para la prueba
+        with open("audit_log.json", "w", encoding="utf-8") as f:
+            json.dump([{"symbol": "TEST", "profit_pct": 0.01, "mfe_pct": 0.02, "mae_pct": -0.01}], f)
+
+        mock_fetcher = MagicMock()
+        # Simular 6 sesiones de SPY: sube de 500 a 505 (+1.00%)
+        spy_dates = pd.date_range("2026-11-01", periods=6, freq="D")
+        spy_df = pd.DataFrame({"Close": [500.0, 501.0, 502.0, 503.0, 504.0, 505.0]}, index=spy_dates)
+        mock_fetcher.fetch_stock.return_value = spy_df
+
+        pm = PostMortemAnalyzer(data_fetcher=mock_fetcher)
+        # Mock de Alpaca Portfolio History: cuenta sube de $100k a $103k (+3.00%)
+        mock_alpaca = MagicMock()
+        mock_history = MagicMock()
+        mock_history.equity = [100000.0, 103000.0]
+        mock_alpaca.get_portfolio_history.return_value = mock_history
+
+        report = pm.generate_weekly_report(alpaca_client=mock_alpaca)
+        
+        # Debe contener retorno de la cuenta, retorno de SPY y Alpha generado (+3.00% - +1.00% = +2.00%)
+        self.assertIn("Retorno Cuenta (1S): +3.00%", report)
+        self.assertIn("Retorno SPY (1S):    +1.00%", report)
+        self.assertIn("Alpha Generado:      +2.00%", report)
+
+    def test_limit_order_slippage_with_signal_price(self):
+        """Verifica que las órdenes límite midan el slippage contra signal_price cuando difiere del fill."""
+        from order_manager import OrderManager
+        from unittest.mock import MagicMock
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = os.path.join(tmp, "p.json")
+            om = OrderManager(state_file=state_file)
+            rm = RiskManager(starting_capital=10000.0, in_memory=True)
+
+            # Señal fue a $100.00, orden enviada con límite $100.20
+            om.add_order(
+                order_id="buy_1",
+                client_order_id="TR2_BUY_1",
+                symbol="NVDA",
+                side="BUY",
+                qty=10.0,
+                limit_price=100.20,
+                signal_price=100.00,
+                asset_type="normal"
+            )
+
+            mock_alpaca = MagicMock()
+            mock_order = MagicMock()
+            mock_order.status = "filled"
+            mock_order.filled_qty = "10.0"
+            mock_order.filled_avg_price = "100.15" # Llenó a 100.15 (15 centavos por encima de la señal)
+            mock_order.filled_at = None
+            mock_alpaca.get_order_by_id.return_value = mock_order
+
+            om.reconcile_orders(mock_alpaca, rm)
+
+            # Slippage = (signal_price - fill_price) * qty = (100.00 - 100.15) * 10 = -$1.50
+            self.assertEqual(len(rm.positions["NVDA"]), 1)
+            self.assertEqual(rm.positions["NVDA"][0].entry_price, 100.15)
+
 
 if __name__ == "__main__":
     unittest.main()

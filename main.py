@@ -428,6 +428,19 @@ class TradingBot:
         # [FASE 2.2] Sincronizar costo de órdenes especulativas pendientes antes de validar
         self.risk_manager.pending_speculative_cost = self.order_manager.get_pending_speculative_cost()
 
+        # [REGIMEN DE MERCADO] Solo calcular si hay candidatos BUY de acciones (evita descargar SPY en monitor ligero)
+        from config import MARKET_REGIME_CONFIG
+        has_stock_buys = any(
+            opp.get("signal_type") == "BUY" and opp.get("details", {}).get("asset_type") not in ["crypto", "forex"]
+            for opp in opportunities
+        )
+        market_regime = {"is_bullish": True}
+        sma_p = 200
+        if has_stock_buys and MARKET_REGIME_CONFIG.get("enabled", True):
+            bench = MARKET_REGIME_CONFIG.get("benchmark", "SPY")
+            sma_p = MARKET_REGIME_CONFIG.get("sma_period", 200)
+            market_regime = self.data_fetcher.get_market_regime(benchmark=bench, sma_period=sma_p)
+
         logger.info("📋 Validando señales con análisis de contexto...\n")
         
         validated = []
@@ -469,8 +482,18 @@ class TradingBot:
                         is_valid = False
                         reasons.append(f"Score insuficiente para venta bajista ({opp['score']:.2f} > {sell_thresh:.2f})")
             
-            # 3. Validación de Capacidad (Solo aplica para COMPRAS)
+            # 3. Validación de Capacidad y Régimen de Mercado (Solo aplica para COMPRAS)
             if is_valid and opp["signal_type"] == "BUY":
+                # Filtro de Régimen de Mercado para acciones
+                atype = opp.get("details", {}).get("asset_type", "normal")
+                if atype not in ["crypto", "forex"]:
+                    if not market_regime.get("is_bullish", True) and not MARKET_REGIME_CONFIG.get("allow_stocks_if_bearish", False):
+                        is_valid = False
+                        b_sym = market_regime.get("benchmark", "SPY")
+                        b_p = market_regime.get("price", 0.0)
+                        b_sma = market_regime.get("sma", 0.0)
+                        reasons.append(f"Régimen de Mercado Bajista ({b_sym} ${b_p:.2f} < SMA{sma_p} ${b_sma:.2f})")
+
                 total_max_positions = sum(RISK_CONFIG.get("max_positions_per_type", {}).values())
                 if len(self.risk_manager.positions) >= total_max_positions:
                     is_valid = False
@@ -752,6 +775,7 @@ class TradingBot:
                                     qty=qty_final,
                                     limit_price=limit_price_to_send,
                                     asset_type=asset_type,
+                                    signal_price=execution_price,
                                     details={"atr": atr, "spread": spread_pct, "score": score, "reason": "SEÑAL_TÉCNICA"}
                                 )
                                 executed_trades.append({
@@ -934,6 +958,7 @@ class TradingBot:
                                                         side="SELL",
                                                         qty=total_qty_to_sell,
                                                         limit_price=limit_price,
+                                                        signal_price=limit_price,
                                                         asset_type=asset_type,
                                                         details={"reason": reason, "atr": atr, "spread": spread_pct, "score": score}
                                                     )
@@ -999,6 +1024,7 @@ class TradingBot:
                                                 side="SELL",
                                                 qty=qty_final_sell,
                                                 limit_price=limit_price_to_send,
+                                                signal_price=limit_price,
                                                 asset_type=asset_type,
                                                 details={"reason": reason, "atr": atr, "spread": spread_pct, "score": score}
                                             )
@@ -1110,6 +1136,67 @@ class TradingBot:
         portfolio_str = self.risk_manager.print_summary()
         self.portfolio_summary_str = portfolio_str # Guardar para que telegram lo pueda acceder
 
+    def update_heartbeat(self):
+        """
+        [HEARTBEAT / DEAD MAN'S SWITCH]
+        Registra el timestamp de la corrida actual en heartbeat.json.
+        Si la última corrida ocurrió hace más de 60 minutos durante horario de mercado (NY),
+        registra una alerta de inactividad.
+        """
+        heartbeat_file = "heartbeat.json"
+        now = datetime.now()
+        now_iso = now.isoformat()
+        
+        if os.path.exists(heartbeat_file) and not self.dry_run:
+            try:
+                with open(heartbeat_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                last_time_str = data.get("last_heartbeat")
+                if last_time_str:
+                    last_time = datetime.fromisoformat(last_time_str)
+                    diff_mins = (now - last_time).total_seconds() / 60.0
+                    
+                    if diff_mins > 60:
+                        try:
+                            import zoneinfo
+                            now_ny = datetime.now(zoneinfo.ZoneInfo("America/New_York"))
+                        except Exception:
+                            now_ny = now
+                        is_market_hours = now_ny.weekday() < 5 and ((now_ny.hour == 9 and now_ny.minute >= 30) or (10 <= now_ny.hour < 16))
+                        if is_market_hours:
+                            msg = f"⚠️ ALERTA INACTIVIDAD: El bot estuvo inactivo por {diff_mins:.1f} minutos durante horario de mercado de NY."
+                            logger.warning(msg)
+                            if self.telegram:
+                                self.telegram.send_error("Dead Man's Switch", msg)
+            except Exception as e:
+                logger.error(f"Error leyendo {heartbeat_file}: {e}")
+
+        if not self.dry_run:
+            try:
+                with open(heartbeat_file, "w", encoding="utf-8") as f:
+                    json.dump({"last_heartbeat": now_iso, "status": "OK"}, f, indent=4)
+            except Exception as e:
+                logger.error(f"Error guardando {heartbeat_file}: {e}")
+
+def send_healthcheck_ping(dry_run: bool = False):
+    """
+    [DEAD MAN'S SWITCH EXTERNO]
+    Envía un ping HTTP a un servicio externo (como healthchecks.io).
+    Si el bot no hace ping dentro del período de gracia (ej. 30 min),
+    el servicio externo envía una alerta automática a Telegram o Email.
+    """
+    if dry_run:
+        return
+    from config import HEALTHCHECK_CONFIG
+    url = HEALTHCHECK_CONFIG.get("url", "").strip()
+    if HEALTHCHECK_CONFIG.get("enabled", True) and url:
+        try:
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                logger.info("📡 Ping de Healthcheck enviado con éxito al monitor externo.")
+        except Exception as e:
+            logger.warning(f"No se pudo enviar ping de Healthcheck: {e}")
+
 # ==========================================
 # MODOS DE EJECUCION
 # ==========================================
@@ -1156,12 +1243,16 @@ def run_full_cycle(bot: "TradingBot", groups: Optional[Set[str]], dry_run: bool,
 
     if weekly_report:
         logger.info("📅 Enviando reporte estadístico semanal Post-Mortem...")
-        bot.telegram.send_post_mortem_report(bot.post_mortem.generate_weekly_report())
+        bot.telegram.send_post_mortem_report(
+            bot.post_mortem.generate_weekly_report(alpaca_client=bot.alpaca_client, risk_manager=bot.risk_manager)
+        )
     return executed
 
 
 def _ensure_protective_stops(bot: "TradingBot", dry_run: bool):
     """Coloca/actualiza los stops de protección en Alpaca al final de cada corrida."""
+    bot.update_heartbeat()
+    send_healthcheck_ping(dry_run=dry_run)
     if dry_run or not bot.stop_manager:
         return
     try:
@@ -1245,7 +1336,7 @@ def mode_report():
     bot.post_mortem.update_logs()
     
     logger.info("Generando reporte...")
-    report_text = bot.post_mortem.generate_weekly_report()
+    report_text = bot.post_mortem.generate_weekly_report(alpaca_client=bot.alpaca_client, risk_manager=bot.risk_manager)
     print("\n" + report_text)
     
     logger.info("Enviando a Telegram...")

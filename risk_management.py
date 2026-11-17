@@ -10,7 +10,7 @@ import logging
 import json
 from pathlib import Path
 from dataclasses import dataclass, asdict
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 from datetime import datetime
 from config import RISK_CONFIG, ASSETS, MICROSTRUCTURE_CONFIG
 
@@ -78,6 +78,12 @@ class RiskManager:
         self.trade_history = []
         self.max_pyramid = 3 # Máximo 3 compras (DCA) del mismo activo
         
+        # Baselines para Freno de Emergencia por Pérdidas (Circuit Breaker)
+        self.daily_baseline_date = None
+        self.daily_baseline_equity = None
+        self.weekly_baseline_week = None
+        self.weekly_baseline_equity = None
+        
         if not self.in_memory:
             self.load_portfolio()
             if not self.audit_file.exists():
@@ -99,6 +105,11 @@ class RiskManager:
                     
                     self.forex_starting_capital = data.get("forex_starting_capital", self.forex_starting_capital)
                     self.forex_capital = data.get("forex_capital", self.forex_starting_capital)
+                    
+                    self.daily_baseline_date = data.get("daily_baseline_date")
+                    self.daily_baseline_equity = data.get("daily_baseline_equity")
+                    self.weekly_baseline_week = data.get("weekly_baseline_week")
+                    self.weekly_baseline_equity = data.get("weekly_baseline_equity")
                     
                     self.trade_history = data.get("trade_history", [])
                     
@@ -132,6 +143,10 @@ class RiskManager:
                 "current_capital": self.current_capital,
                 "forex_starting_capital": self.forex_starting_capital,
                 "forex_capital": self.forex_capital,
+                "daily_baseline_date": self.daily_baseline_date,
+                "daily_baseline_equity": self.daily_baseline_equity,
+                "weekly_baseline_week": self.weekly_baseline_week,
+                "weekly_baseline_equity": self.weekly_baseline_equity,
                 "positions": {sym: [p.to_dict() for p in pos_list] for sym, pos_list in self.positions.items()},
                 "trade_history": self.trade_history
             }
@@ -139,6 +154,64 @@ class RiskManager:
                 json.dump(data, f, indent=4)
         except Exception as e:
             logger.error(f"Error guardando portfolio.json: {e}")
+
+    def check_circuit_breaker(self) -> Tuple[bool, str]:
+        """
+        [CIRCUIT BREAKER] Evalúa pérdidas intradía o intrasemanales.
+        Usa account.last_equity vs account.equity de Alpaca cuando esté disponible (SSOT).
+        En simulación o modo local, usa Mark-to-Market contra el baseline registrado en disco.
+        """
+        from config import CIRCUIT_BREAKER_CONFIG
+        if not CIRCUIT_BREAKER_CONFIG.get("enabled", True):
+            return False, ""
+
+        max_daily = CIRCUIT_BREAKER_CONFIG.get("max_daily_loss_pct", 0.02)
+        max_weekly = CIRCUIT_BREAKER_CONFIG.get("max_weekly_loss_pct", 0.05)
+
+        # 1. Si tenemos datos reales de Alpaca (SSOT)
+        if getattr(self, "broker_last_equity", 0.0) > 0 and getattr(self, "broker_equity", 0.0) > 0:
+            daily_loss = (self.broker_last_equity - self.broker_equity) / self.broker_last_equity
+            if daily_loss >= max_daily:
+                return True, f"Freno Diario Activo (Alpaca): Pérdida hoy de {daily_loss*100:.2f}% >= {max_daily*100:.1f}% (${self.broker_equity:,.2f} vs cierre ayer ${self.broker_last_equity:,.2f})"
+
+        # 2. Mark-to-Market local / simulación
+        try:
+            import zoneinfo
+            now_ny = datetime.now(zoneinfo.ZoneInfo("America/New_York"))
+        except Exception:
+            now_ny = datetime.now()
+        today_str = now_ny.strftime("%Y-%m-%d")
+        current_week_str = now_ny.strftime("%Y-W%U")
+        current_equity = self.get_total_portfolio_value(is_forex=False)
+
+        # Inicializar baselines si cambia de día o de semana, y persistir
+        changed_baseline = False
+        if self.daily_baseline_date != today_str or not self.daily_baseline_equity:
+            self.daily_baseline_date = today_str
+            self.daily_baseline_equity = current_equity
+            changed_baseline = True
+
+        if self.weekly_baseline_week != current_week_str or not self.weekly_baseline_equity:
+            self.weekly_baseline_week = current_week_str
+            self.weekly_baseline_equity = current_equity
+            changed_baseline = True
+
+        if changed_baseline:
+            self.save_portfolio()
+
+        # Pérdida Diaria
+        if self.daily_baseline_equity and self.daily_baseline_equity > 0:
+            daily_loss = (self.daily_baseline_equity - current_equity) / self.daily_baseline_equity
+            if daily_loss >= max_daily:
+                return True, f"Freno Diario Activo: Pérdida hoy de {daily_loss*100:.2f}% >= {max_daily*100:.1f}% (${current_equity:,.2f} vs base hoy ${self.daily_baseline_equity:,.2f})"
+
+        # Pérdida Semanal
+        if self.weekly_baseline_equity and self.weekly_baseline_equity > 0:
+            weekly_loss = (self.weekly_baseline_equity - current_equity) / self.weekly_baseline_equity
+            if weekly_loss >= max_weekly:
+                return True, f"Freno Semanal Activo: Pérdida semanal de {weekly_loss*100:.2f}% >= {max_weekly*100:.1f}% (${current_equity:,.2f} vs base semana ${self.weekly_baseline_equity:,.2f})"
+
+        return False, ""
 
     def categorize_asset(self, symbol: str, price: float) -> str:
         """Determina la microestructura del activo para asignar reglas específicas."""
@@ -166,6 +239,20 @@ class RiskManager:
             account = alpaca_client.get_account()
             # [BLOQUEANTE 4 CORREGIDO] Usar cash o equity real, NO buying_power que en cuentas con margen infla el capital 2x a 4x
             self.current_capital = float(account.cash if hasattr(account, 'cash') else account.equity)
+            self.broker_equity = float(account.equity if hasattr(account, 'equity') else self.current_capital)
+            self.broker_last_equity = float(account.last_equity if hasattr(account, 'last_equity') else self.broker_equity)
+            
+            # [CIRCUIT BREAKER] Fijar baseline semanal al inicio de semana usando cierre del viernes (last_equity)
+            try:
+                import zoneinfo
+                now_ny = datetime.now(zoneinfo.ZoneInfo("America/New_York"))
+            except Exception:
+                now_ny = datetime.now()
+            current_week_str = now_ny.strftime("%Y-W%U")
+            if self.weekly_baseline_week != current_week_str:
+                self.weekly_baseline_week = current_week_str
+                self.weekly_baseline_equity = float(account.last_equity if hasattr(account, 'last_equity') else self.broker_equity)
+                self.save_portfolio()
             
             real_positions = alpaca_client.get_all_positions()
             real_symbols = []
@@ -251,13 +338,23 @@ class RiskManager:
             logger.error(f"Error sincronizando con Alpaca: {e}")
 
     def get_total_portfolio_value(self, is_forex: bool = False) -> float:
+        """Calcula el valor total del portafolio en Mark-to-Market (Efectivo + Valor Actual de Mercado)."""
+        forex_symbols = ASSETS.get("forex", [])
         if is_forex:
-            forex_symbols = ASSETS.get("forex", [])
-            pos_value = sum(p.quantity * p.entry_price for sym, pos_list in self.positions.items() if sym in forex_symbols for p in pos_list)
+            pos_value = sum(
+                p.quantity * (p.last_known_price if p.last_known_price > 0 else p.entry_price)
+                for sym, pos_list in self.positions.items()
+                if sym in forex_symbols
+                for p in pos_list
+            )
             return self.forex_capital + pos_value
         else:
-            forex_symbols = ASSETS.get("forex", [])
-            pos_value = sum(p.quantity * p.entry_price for sym, pos_list in self.positions.items() if sym not in forex_symbols for p in pos_list)
+            pos_value = sum(
+                p.quantity * (p.last_known_price if p.last_known_price > 0 else p.entry_price)
+                for sym, pos_list in self.positions.items()
+                if sym not in forex_symbols
+                for p in pos_list
+            )
             return self.current_capital + pos_value
 
     def get_drawdown(self) -> float:
@@ -310,7 +407,13 @@ class RiskManager:
         return final_capital / entry_price
 
     def can_open_position(self, symbol: str, price: float, spread_pct: float, asset_type: str) -> bool:
-        """Reglas de filtrado anti-amnesia, liquidez y sector."""
+        """Reglas de filtrado anti-amnesia, liquidez, sector y freno de emergencia."""
+        # [CIRCUIT BREAKER] Freno de emergencia por pérdidas intradía o semanales
+        tripped, cb_reason = self.check_circuit_breaker()
+        if tripped:
+            logger.warning(f"[{symbol}] Rechazado por Circuit Breaker: {cb_reason}")
+            return False
+
         rules = MICROSTRUCTURE_CONFIG[asset_type]
         
         if spread_pct > rules["max_spread_pct"]:
@@ -496,7 +599,7 @@ class RiskManager:
         self.save_portfolio()
         return forced_exits
 
-    def close_position(self, symbol: str, price: float, reason: str, exit_date: str, exit_atr: float = 0.0, exit_spread: float = 0.0, exit_score: float = 0.0, quantity_to_close: Optional[float] = None) -> float:
+    def close_position(self, symbol: str, price: float, reason: str, exit_date: str, exit_atr: float = 0.0, exit_spread: float = 0.0, exit_score: float = 0.0, quantity_to_close: Optional[float] = None, slippage_usd: float = 0.0, slippage_pct: float = 0.0) -> float:
         """Cierra posiciones de un activo (total o parcialmente), guarda historial y escribe en Audit Log."""
         if symbol not in self.positions or not self.positions[symbol]:
             return 0.0
@@ -552,7 +655,9 @@ class RiskManager:
                 "quantity": qty_closing_lot,
                 "pnl": pnl,
                 "reason": reason,
-                "date": exit_date
+                "date": exit_date,
+                "slippage_usd": slippage_usd,
+                "slippage_pct": slippage_pct
             }
             self.trade_history.append(hist_entry)
             
@@ -567,6 +672,8 @@ class RiskManager:
                 "profit_usd": pnl,
                 "profit_pct": pnl_pct,
                 "holding_time_hours": hold_hours,
+                "slippage_usd": slippage_usd,
+                "slippage_pct": slippage_pct,
                 "reason": reason,
                 "spread_entry": pos.spread_at_entry,
                 "spread_exit": exit_spread,
